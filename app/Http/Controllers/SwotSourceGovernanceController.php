@@ -5,17 +5,21 @@ namespace App\Http\Controllers;
 use App\Http\Requests\StoreSwotSourceGovernanceRequest;
 use App\Http\Requests\UpdateSwotSourceGovernanceRequest;
 use App\Http\Services\Swot\CustomerScopeResolver;
+use App\Http\Services\Swot\SwotAnalysisService;
 use App\Models\SwotAnalysis;
 use App\Models\SwotSourceGovernance;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
+use Illuminate\Support\Arr;
 use Illuminate\Support\Carbon;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Str;
 
 class SwotSourceGovernanceController extends Controller
 {
     public function __construct(
         private readonly CustomerScopeResolver $customerScope,
+        private readonly SwotAnalysisService $analysisService,
     ) {
     }
 
@@ -124,12 +128,58 @@ class SwotSourceGovernanceController extends Controller
 
         $validated['last_seen_at'] = Carbon::now();
 
+        $previousStatus = (string) $source->status;
+        $previousPriority = (bool) $source->is_priority;
         $source->fill($validated);
         $source->save();
+
+        $reanalysis = [
+            'triggered' => false,
+            'status' => 'not_required',
+            'analysis' => null,
+            'reason' => null,
+        ];
+        $statusNow = (string) $source->status;
+        $priorityNow = (bool) $source->is_priority;
+        $becameApproved = $statusNow === 'approved' && $previousStatus !== 'approved';
+        $becamePriority = $priorityNow && ! $previousPriority;
+        $explicitApproveRequest = array_key_exists('status', $validated) && $statusNow === 'approved';
+        if ($becameApproved || $becamePriority || $explicitApproveRequest) {
+            $reanalysis['triggered'] = true;
+            try {
+                $regenerated = $this->analysisService->regenerateLatestFromStoredPrompt(
+                    $customerUuid,
+                    $source->analysis_run_id ? (string) $source->analysis_run_id : null,
+                    array_key_exists('analysis_prompt', $validated)
+                        ? (is_string($validated['analysis_prompt']) ? $validated['analysis_prompt'] : null)
+                        : null
+                );
+                if (is_array($regenerated)) {
+                    $reanalysis['status'] = 'completed';
+                    $reanalysis['analysis'] = Arr::get($regenerated, 'analysis');
+                } else {
+                    $reanalysis['status'] = 'skipped';
+                    $reanalysis['reason'] = 'missing_stored_prompt';
+                }
+            } catch (\Throwable $exception) {
+                $reanalysis['status'] = 'failed';
+                $reanalysis['reason'] = 'generation_error';
+                Log::error('SWOT reanalysis after source governance update failed.', [
+                    'customer_uuid' => $customerUuid,
+                    'source_uuid' => $source->uuid,
+                    'status' => $statusNow,
+                    'is_priority' => $priorityNow,
+                    'exception' => $exception,
+                ]);
+            }
+        }
 
         return response()->json([
             'success' => true,
             'data' => $source,
+            'meta' => [
+                'reanalysis' => $reanalysis,
+            ],
         ]);
     }
 

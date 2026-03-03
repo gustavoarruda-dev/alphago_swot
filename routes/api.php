@@ -23,6 +23,11 @@ Route::prefix('v1')
             Route::get('analysis', [SwotAnalysisController::class, 'index']);
             Route::post('analysis/generate', [SwotAnalysisController::class, 'generate']);
             Route::get('analysis/{analysis:uuid}', [SwotAnalysisController::class, 'show']);
+            Route::get('analysis/{analysis:uuid}/overview', [SwotAnalysisController::class, 'overview']);
+            Route::get('analysis/{analysis:uuid}/factors', [SwotAnalysisController::class, 'factors']);
+            Route::get('analysis/{analysis:uuid}/recommendations', [SwotAnalysisController::class, 'recommendations']);
+            Route::get('analysis/{analysis:uuid}/action-plan', [SwotAnalysisController::class, 'actionPlan']);
+            Route::get('analysis/{analysis:uuid}/strategic-implications', [SwotAnalysisController::class, 'strategicImplications']);
 
             Route::post('analysis/{analysis:uuid}/factors', [SwotAnalysisController::class, 'storeFactor']);
             Route::patch('analysis/{analysis:uuid}/factors/{item:uuid}', [SwotAnalysisController::class, 'updateFactor']);

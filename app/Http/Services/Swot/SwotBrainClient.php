@@ -19,7 +19,8 @@ class SwotBrainClient
             throw new RuntimeException('BRAIN base URI is not configured.');
         }
 
-        $timeout = (int) config('services.brain.timeout', 120);
+        // SWOT generation often needs multi-tool aggregation; avoid premature timeout.
+        $timeout = max(300, (int) config('services.brain.timeout', 300));
 
         $request = Http::acceptJson()
             ->timeout($timeout)

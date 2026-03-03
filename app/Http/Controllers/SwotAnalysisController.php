@@ -59,6 +59,63 @@ class SwotAnalysisController extends Controller
         ]);
     }
 
+    public function overview(Request $request, SwotAnalysis $analysis): JsonResponse
+    {
+        $customerUuid = $this->customerScope->resolve($request);
+
+        return response()->json([
+            'success' => true,
+            'data' => $this->service->getOverviewForCustomer($analysis, $customerUuid),
+        ]);
+    }
+
+    public function factors(Request $request, SwotAnalysis $analysis): JsonResponse
+    {
+        $customerUuid = $this->customerScope->resolve($request);
+        $options = $request->validate([
+            'top_factors_limit' => ['nullable', 'integer', 'min:1', 'max:100'],
+            'bottom_factors_limit' => ['nullable', 'integer', 'min:1', 'max:100'],
+        ]);
+
+        return response()->json([
+            'success' => true,
+            'data' => $this->service->getFactorsForCustomer($analysis, $customerUuid, $options),
+        ]);
+    }
+
+    public function recommendations(Request $request, SwotAnalysis $analysis): JsonResponse
+    {
+        $customerUuid = $this->customerScope->resolve($request);
+        $options = $request->validate([
+            'recommendations_limit' => ['nullable', 'integer', 'min:1', 'max:100'],
+        ]);
+
+        return response()->json([
+            'success' => true,
+            'data' => $this->service->getRecommendationsForCustomer($analysis, $customerUuid, $options),
+        ]);
+    }
+
+    public function actionPlan(Request $request, SwotAnalysis $analysis): JsonResponse
+    {
+        $customerUuid = $this->customerScope->resolve($request);
+
+        return response()->json([
+            'success' => true,
+            'data' => $this->service->getActionPlanForCustomer($analysis, $customerUuid),
+        ]);
+    }
+
+    public function strategicImplications(Request $request, SwotAnalysis $analysis): JsonResponse
+    {
+        $customerUuid = $this->customerScope->resolve($request);
+
+        return response()->json([
+            'success' => true,
+            'data' => $this->service->getStrategicImplicationsForCustomer($analysis, $customerUuid),
+        ]);
+    }
+
     public function storeFactor(
         StoreSwotFactorRequest $request,
         SwotAnalysis $analysis

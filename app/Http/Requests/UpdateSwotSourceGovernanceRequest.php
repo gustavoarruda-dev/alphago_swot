@@ -25,6 +25,7 @@ class UpdateSwotSourceGovernanceRequest extends FormRequest
             'source_category' => ['sometimes', 'nullable', 'string', 'max:128'],
             'status' => ['sometimes', 'in:pending,approved,rejected'],
             'is_priority' => ['sometimes', 'boolean'],
+            'analysis_prompt' => ['sometimes', 'nullable', 'string', 'max:30000'],
             'extra_metadata' => ['sometimes', 'nullable', 'array'],
         ];
     }
