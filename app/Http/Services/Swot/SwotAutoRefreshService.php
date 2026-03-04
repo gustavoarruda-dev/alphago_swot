@@ -121,9 +121,9 @@ class SwotAutoRefreshService
 
     private function resolveStaleHours(): int
     {
-        $raw = (int) config('swot.auto_refresh.stale_hours', 24);
+        $raw = (int) config('swot.auto_refresh.stale_hours', 1);
 
-        return $raw > 0 ? $raw : 24;
+        return $raw > 0 ? $raw : 1;
     }
 
     private function isStale(?CarbonInterface $generatedAt, CarbonInterface $now, int $staleHours): bool

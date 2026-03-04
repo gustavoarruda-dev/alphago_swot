@@ -38,9 +38,9 @@ Artisan::command('swot:auto-refresh {--customer_uuid=} {--force}', function (Swo
     }
 
     return $summary['failed'] > 0 ? 1 : 0;
-})->purpose('Auto-refresh SWOT analyses when stale (>24h) or after approved source updates.');
+})->purpose('Auto-refresh SWOT analyses when stale (>configured hours) or after approved source updates.');
 
 Schedule::command('swot:auto-refresh')
-    ->everyFifteenMinutes()
+    ->hourly()
     ->withoutOverlapping()
     ->when(fn (): bool => (bool) config('swot.auto_refresh.enabled', true));

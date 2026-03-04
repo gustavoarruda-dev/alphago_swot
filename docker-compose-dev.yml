@@ -30,7 +30,7 @@ services:
       BRAIN_BASE_URI: http://alphago-brain:8000
       BRAIN_API_KEY: 8eec7a4d-e587-4989-bb07-9313b7f21ff8
       SWOT_AUTO_REFRESH_ENABLED: "true"
-      SWOT_AUTO_REFRESH_STALE_HOURS: "24"
+      SWOT_AUTO_REFRESH_STALE_HOURS: "1"
     command: sh -lc "composer install --no-interaction --prefer-dist && php artisan migrate --force && php -S 0.0.0.0:8000 -t public public/index.php"
 
   swot-scheduler:
@@ -62,7 +62,7 @@ services:
       BRAIN_BASE_URI: http://alphago-brain:8000
       BRAIN_API_KEY: 8eec7a4d-e587-4989-bb07-9313b7f21ff8
       SWOT_AUTO_REFRESH_ENABLED: "true"
-      SWOT_AUTO_REFRESH_STALE_HOURS: "24"
+      SWOT_AUTO_REFRESH_STALE_HOURS: "1"
     command: sh -lc "composer install --no-interaction --prefer-dist && php artisan migrate --force && php artisan schedule:work"
 
   swot-db:
