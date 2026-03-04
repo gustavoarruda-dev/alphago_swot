@@ -21,6 +21,8 @@ class UpdateSwotActionRequest extends FormRequest
             'strategic_action' => ['sometimes', 'string', 'max:5000'],
             'title' => ['sometimes', 'string', 'max:5000'],
             'swot_link' => ['sometimes', 'nullable', 'url', 'max:5000'],
+            'source_url' => ['sometimes', 'nullable', 'url', 'max:5000'],
+            'source_name' => ['sometimes', 'nullable', 'string', 'max:255'],
             'period' => ['sometimes', 'nullable', 'string', 'max:64'],
             'kpi' => ['sometimes', 'nullable', 'string', 'max:255'],
             'owner' => ['sometimes', 'nullable', 'string', 'max:128'],

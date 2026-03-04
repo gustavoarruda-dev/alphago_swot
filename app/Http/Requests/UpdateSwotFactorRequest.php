@@ -24,6 +24,8 @@ class UpdateSwotFactorRequest extends FormRequest
             'priority' => ['sometimes', 'nullable', 'string', 'max:32'],
             'impact' => ['sometimes', 'nullable', 'string', 'max:32'],
             'dimension' => ['sometimes', 'nullable', 'string', 'max:128'],
+            'source_name' => ['sometimes', 'nullable', 'string', 'max:255'],
+            'source_url' => ['sometimes', 'nullable', 'url', 'max:5000'],
         ];
     }
 }

@@ -523,6 +523,9 @@ class SwotAnalysisService
             throw new \InvalidArgumentException('title is required.');
         }
 
+        $sourceName = $this->sanitizeSourceName($payload['source_name'] ?? null);
+        $sourceUrl = $this->normalizeExternalUrl($payload['source_url'] ?? $payload['swot_link'] ?? null);
+
         $card->items()->create([
             'item_key' => null,
             'title' => $title,
@@ -531,9 +534,12 @@ class SwotAnalysisService
             'priority' => $this->sanitizeString($payload['priority'] ?? null),
             'impact' => $this->sanitizeString($payload['impact'] ?? null),
             'dimension' => $this->sanitizeString($payload['dimension'] ?? null),
+            'swot_link' => $sourceUrl,
             'sort_order' => $nextOrder,
             'metadata' => [
                 'origin' => 'manual',
+                'source_name' => $sourceName,
+                'source_url' => $sourceUrl,
             ],
         ]);
 
@@ -553,14 +559,28 @@ class SwotAnalysisService
         $this->assertAnalysisCustomerScope($analysis, $customerUuid);
         $this->assertItemBelongsToAnalysisGroup($analysis, $item, 'factors');
 
-        $item->fill(array_filter([
+        $sourceUrlProvided = array_key_exists('source_url', $payload) || array_key_exists('swot_link', $payload);
+        $sourceUrl = $this->normalizeExternalUrl($payload['source_url'] ?? $payload['swot_link'] ?? null);
+
+        $updates = array_filter([
             'title' => $this->sanitizeString($payload['title'] ?? null),
             'description' => $this->sanitizeString($payload['description'] ?? null),
             'tag' => $this->sanitizeString($payload['tag'] ?? null),
             'priority' => $this->sanitizeString($payload['priority'] ?? null),
             'impact' => $this->sanitizeString($payload['impact'] ?? null),
             'dimension' => $this->sanitizeString($payload['dimension'] ?? null),
-        ], static fn ($value) => $value !== null));
+        ], static fn ($value) => $value !== null);
+        if ($sourceUrlProvided) {
+            $updates['swot_link'] = $sourceUrl;
+        }
+        $item->fill($updates);
+
+        $this->applySourceMetadataPatch(
+            $item,
+            $payload,
+            defaultOrigin: 'manual',
+            sourceUrl: $sourceUrlProvided ? $sourceUrl : null,
+        );
 
         $item->save();
 
@@ -593,11 +613,25 @@ class SwotAnalysisService
         $this->assertAnalysisCustomerScope($analysis, $customerUuid);
         $this->assertItemBelongsToAnalysisGroup($analysis, $item, 'recommendations');
 
-        $item->fill(array_filter([
+        $sourceUrlProvided = array_key_exists('source_url', $payload) || array_key_exists('swot_link', $payload);
+        $sourceUrl = $this->normalizeExternalUrl($payload['source_url'] ?? $payload['swot_link'] ?? null);
+
+        $updates = array_filter([
             'title' => $this->sanitizeString($payload['title'] ?? null),
             'priority' => $this->sanitizeString($payload['priority'] ?? null),
             'period' => $this->sanitizeString($payload['period_label'] ?? $payload['period'] ?? null),
-        ], static fn ($value) => $value !== null));
+        ], static fn ($value) => $value !== null);
+        if ($sourceUrlProvided) {
+            $updates['swot_link'] = $sourceUrl;
+        }
+        $item->fill($updates);
+
+        $this->applySourceMetadataPatch(
+            $item,
+            $payload,
+            defaultOrigin: 'manual',
+            sourceUrl: $sourceUrlProvided ? $sourceUrl : null,
+        );
 
         $item->save();
 
@@ -630,14 +664,27 @@ class SwotAnalysisService
         $this->assertAnalysisCustomerScope($analysis, $customerUuid);
         $this->assertItemBelongsToAnalysisGroup($analysis, $item, 'action_plan');
 
-        $item->fill(array_filter([
+        $sourceUrlProvided = array_key_exists('source_url', $payload) || array_key_exists('swot_link', $payload);
+        $sourceUrl = $this->normalizeExternalUrl($payload['source_url'] ?? $payload['swot_link'] ?? null);
+
+        $updates = array_filter([
             'title' => $this->sanitizeString($payload['strategic_action'] ?? $payload['title'] ?? null),
-            'swot_link' => $this->normalizeExternalUrl($payload['swot_link'] ?? null),
             'period' => $this->sanitizeString($payload['period'] ?? null),
             'kpi' => $this->sanitizeString($payload['kpi'] ?? null),
             'owner' => $this->sanitizeString($payload['owner'] ?? null),
             'priority' => $this->sanitizeString($payload['priority'] ?? null),
-        ], static fn ($value) => $value !== null));
+        ], static fn ($value) => $value !== null);
+        if ($sourceUrlProvided) {
+            $updates['swot_link'] = $sourceUrl;
+        }
+        $item->fill($updates);
+
+        $this->applySourceMetadataPatch(
+            $item,
+            $payload,
+            defaultOrigin: 'manual',
+            sourceUrl: $sourceUrlProvided ? $sourceUrl : null,
+        );
 
         $item->save();
 
@@ -655,6 +702,37 @@ class SwotAnalysisService
         $item->delete();
 
         return $this->formatAnalysisPayload($analysis->fresh(['cards.items']));
+    }
+
+    /**
+     * @param array<string, mixed> $payload
+     */
+    private function applySourceMetadataPatch(
+        SwotCardItem $item,
+        array $payload,
+        string $defaultOrigin = 'manual',
+        ?string $sourceUrl = null
+    ): void {
+        $sourceNameProvided = array_key_exists('source_name', $payload);
+        $sourceUrlProvided = array_key_exists('source_url', $payload) || array_key_exists('swot_link', $payload);
+
+        if (! $sourceNameProvided && ! $sourceUrlProvided) {
+            return;
+        }
+
+        $metadata = is_array($item->metadata) ? $item->metadata : [];
+        if (! isset($metadata['origin']) || ! is_string($metadata['origin']) || trim($metadata['origin']) === '') {
+            $metadata['origin'] = $defaultOrigin;
+        }
+
+        if ($sourceNameProvided) {
+            $metadata['source_name'] = $this->sanitizeSourceName($payload['source_name'] ?? null);
+        }
+        if ($sourceUrlProvided) {
+            $metadata['source_url'] = $sourceUrl;
+        }
+
+        $item->metadata = $metadata;
     }
 
     /**
@@ -699,12 +777,12 @@ class SwotAnalysisService
                     'priority' => $this->sanitizeString($item['priority'] ?? null),
                     'impact' => $this->sanitizeString($item['impact'] ?? null),
                     'dimension' => $this->sanitizeString($item['dimension'] ?? null),
-                    'swot_link' => $this->normalizeExternalUrl($item['swot_link'] ?? null),
+                    'swot_link' => $this->normalizeExternalUrl($item['source_url'] ?? $item['swot_link'] ?? null),
                     'sort_order' => $index + 1,
                     'metadata' => [
                         'origin' => 'ai',
                         'source_name' => $this->sanitizeSourceName($item['source_name'] ?? null),
-                        'source_url' => $this->normalizeExternalUrl($item['swot_link'] ?? null),
+                        'source_url' => $this->normalizeExternalUrl($item['source_url'] ?? $item['swot_link'] ?? null),
                     ],
                 ]);
             }
@@ -740,12 +818,12 @@ class SwotAnalysisService
                     'title' => $title,
                     'priority' => $this->sanitizeString($item['priority'] ?? null),
                     'period' => $this->sanitizeString($item['period_label'] ?? $item['period'] ?? null),
-                    'swot_link' => $this->normalizeExternalUrl($item['swot_link'] ?? null),
+                    'swot_link' => $this->normalizeExternalUrl($item['source_url'] ?? $item['swot_link'] ?? null),
                     'sort_order' => $index + 1,
                     'metadata' => [
                         'origin' => 'ai',
                         'source_name' => $this->sanitizeSourceName($item['source_name'] ?? null),
-                        'source_url' => $this->normalizeExternalUrl($item['swot_link'] ?? null),
+                        'source_url' => $this->normalizeExternalUrl($item['source_url'] ?? $item['swot_link'] ?? null),
                     ],
                 ]);
             }
@@ -799,7 +877,7 @@ class SwotAnalysisService
                 $card->items()->create([
                     'item_key' => $this->sanitizeString($item['item_key'] ?? null),
                     'title' => $title,
-                    'swot_link' => $this->normalizeExternalUrl($item['swot_link'] ?? null),
+                    'swot_link' => $this->normalizeExternalUrl($item['source_url'] ?? $item['swot_link'] ?? null),
                     'period' => $this->sanitizeString($item['period'] ?? null),
                     'kpi' => $this->sanitizeString($item['kpi'] ?? null),
                     'owner' => $this->sanitizeString($item['owner'] ?? null),
@@ -808,7 +886,7 @@ class SwotAnalysisService
                     'metadata' => [
                         'origin' => 'ai',
                         'source_name' => $this->sanitizeSourceName($item['source_name'] ?? null),
-                        'source_url' => $this->normalizeExternalUrl($item['swot_link'] ?? null),
+                        'source_url' => $this->normalizeExternalUrl($item['source_url'] ?? $item['swot_link'] ?? null),
                     ],
                 ]);
             }

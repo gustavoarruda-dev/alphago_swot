@@ -22,6 +22,8 @@ class UpdateSwotRecommendationRequest extends FormRequest
             'priority' => ['sometimes', 'nullable', 'string', 'max:32'],
             'period_label' => ['sometimes', 'nullable', 'string', 'max:64'],
             'period' => ['sometimes', 'nullable', 'string', 'max:64'],
+            'source_name' => ['sometimes', 'nullable', 'string', 'max:255'],
+            'source_url' => ['sometimes', 'nullable', 'url', 'max:5000'],
         ];
     }
 }

@@ -25,6 +25,8 @@ class StoreSwotFactorRequest extends FormRequest
             'priority' => ['nullable', 'string', 'max:32'],
             'impact' => ['nullable', 'string', 'max:32'],
             'dimension' => ['nullable', 'string', 'max:128'],
+            'source_name' => ['sometimes', 'nullable', 'string', 'max:255'],
+            'source_url' => ['sometimes', 'nullable', 'url', 'max:5000'],
         ];
     }
 }
