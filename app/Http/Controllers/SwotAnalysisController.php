@@ -99,10 +99,17 @@ class SwotAnalysisController extends Controller
     public function actionPlan(Request $request, SwotAnalysis $analysis): JsonResponse
     {
         $customerUuid = $this->customerScope->resolve($request);
+        $options = $request->validate([
+            'area_key' => ['nullable', 'string', 'max:128'],
+            'sort_by' => ['nullable', 'string', 'in:strategic_action,swot_link,period,kpi,owner,priority'],
+            'sort_dir' => ['nullable', 'string', 'in:asc,desc'],
+            'page' => ['nullable', 'integer', 'min:1'],
+            'per_page' => ['nullable', 'integer', 'min:1', 'max:100'],
+        ]);
 
         return response()->json([
             'success' => true,
-            'data' => $this->service->getActionPlanForCustomer($analysis, $customerUuid),
+            'data' => $this->service->getActionPlanForCustomer($analysis, $customerUuid, $options),
         ]);
     }
 

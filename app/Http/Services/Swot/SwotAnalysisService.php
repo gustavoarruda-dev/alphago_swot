@@ -161,7 +161,7 @@ class SwotAnalysisService
     private const MIN_IMPLICATION_GROUPS = 4;
     private const MIN_IMPLICATION_ITEMS_PER_GROUP = 3;
     private const MIN_ACTION_AREAS = 6;
-    private const MIN_ACTION_ITEMS_PER_AREA = 2;
+    private const MIN_ACTION_ITEMS_PER_AREA = 10;
     private const REQUIRED_IMPLICATION_GROUP_KEYS = [
         'so-accelerate',
         'st-defend',
@@ -356,17 +356,114 @@ class SwotAnalysisService
     /**
      * @return array<string, mixed>
      */
-    public function getActionPlanForCustomer(SwotAnalysis $analysis, string $customerUuid): array
+    public function getActionPlanForCustomer(
+        SwotAnalysis $analysis,
+        string $customerUuid,
+        array $options = []
+    ): array
     {
         $this->assertAnalysisCustomerScope($analysis, $customerUuid);
         $payload = $this->formatAnalysisPayload($analysis->loadMissing('cards.items'));
+        $actionPlan = Arr::get($payload, 'content.action_plan', []);
+
+        $areaKey = $this->sanitizeString($options['area_key'] ?? null);
+        $sortBy = $this->sanitizeString($options['sort_by'] ?? null) ?? 'priority';
+        $sortDir = strtolower($this->sanitizeString($options['sort_dir'] ?? null) ?? 'desc') === 'asc' ? 'asc' : 'desc';
+        $page = max(1, (int) ($options['page'] ?? 1));
+        $perPage = min(100, max(1, (int) ($options['per_page'] ?? 10)));
+
+        if ($areaKey !== null && is_array($actionPlan)) {
+            foreach ($actionPlan as $index => $area) {
+                if (! is_array($area)) {
+                    continue;
+                }
+                $currentAreaKey = $this->sanitizeString($area['area_key'] ?? null);
+                if ($currentAreaKey === null || ! hash_equals($currentAreaKey, $areaKey)) {
+                    continue;
+                }
+
+                $items = collect(is_array($area['items'] ?? null) ? $area['items'] : []);
+                $sorted = $this->sortActionPlanItemsCollection($items, $sortBy, $sortDir);
+                $totalItems = $sorted->count();
+                $totalPages = max(1, (int) ceil($totalItems / $perPage));
+                $safePage = min($page, $totalPages);
+                $offset = ($safePage - 1) * $perPage;
+
+                $actionPlan[$index]['items'] = $sorted->slice($offset, $perPage)->values()->all();
+
+                return [
+                    'analysis' => $payload['analysis'],
+                    'content' => [
+                        'action_plan' => $actionPlan,
+                    ],
+                    'meta' => [
+                        'action_plan' => [
+                            'area_key' => $areaKey,
+                            'sort_by' => $sortBy,
+                            'sort_dir' => $sortDir,
+                            'page' => $safePage,
+                            'per_page' => $perPage,
+                            'total_items' => $totalItems,
+                            'total_pages' => $totalPages,
+                        ],
+                    ],
+                ];
+            }
+        }
 
         return [
             'analysis' => $payload['analysis'],
             'content' => [
-                'action_plan' => Arr::get($payload, 'content.action_plan', []),
+                'action_plan' => $actionPlan,
             ],
         ];
+    }
+
+    /**
+     * @param \Illuminate\Support\Collection<int, array<string, mixed>> $items
+     * @return \Illuminate\Support\Collection<int, array<string, mixed>>
+     */
+    private function sortActionPlanItemsCollection($items, string $sortBy, string $sortDir)
+    {
+        $priorityWeight = static function (?string $value): int {
+            $normalized = Str::lower(trim((string) $value));
+            return match ($normalized) {
+                'crítica', 'critica' => 4,
+                'alta' => 3,
+                'média', 'media' => 2,
+                'baixa' => 1,
+                default => 0,
+            };
+        };
+
+        $mapText = static function (mixed $value): string {
+            return Str::lower(trim((string) $value));
+        };
+
+        $sorted = $items->sort(function (array $left, array $right) use ($sortBy, $sortDir, $priorityWeight, $mapText): int {
+            $leftValue = null;
+            $rightValue = null;
+
+            if ($sortBy === 'priority') {
+                $leftValue = $priorityWeight($left['priority'] ?? null);
+                $rightValue = $priorityWeight($right['priority'] ?? null);
+            } elseif ($sortBy === 'swot_link') {
+                $leftValue = $mapText($left['swot_link'] ?? ($left['source_name'] ?? ''));
+                $rightValue = $mapText($right['swot_link'] ?? ($right['source_name'] ?? ''));
+            } else {
+                $leftValue = $mapText($left[$sortBy] ?? '');
+                $rightValue = $mapText($right[$sortBy] ?? '');
+            }
+
+            if ($leftValue === $rightValue) {
+                return 0;
+            }
+
+            $cmp = $leftValue <=> $rightValue;
+            return $sortDir === 'asc' ? $cmp : -$cmp;
+        });
+
+        return $sorted->values();
     }
 
     /**
@@ -1555,7 +1652,7 @@ class SwotAnalysisService
             'Gere somente o bloco action_plan.',
             'Regras obrigatorias:',
             '- 6 areas fixas obrigatorias: technology-product, commercial-marketing, operations-support, finance-pricing, hr-people, legal-compliance.',
-            '- Minimo 2 items por area.',
+            '- Minimo 10 items por area.',
             '- Cada item: strategic_action, source_name, source_url, period, kpi, owner, priority.',
             '- source_url deve ser URL externa HTTP/HTTPS valida.',
             'Schema de resposta:',
