@@ -159,7 +159,7 @@ class SwotAnalysisService
     private const MIN_FACTOR_DESCRIPTION_CHARS = 70;
     private const MIN_RECOMMENDATION_ITEMS_PER_BUCKET = 3;
     private const MIN_IMPLICATION_GROUPS = 4;
-    private const MIN_IMPLICATION_ITEMS_PER_GROUP = 3;
+    private const MIN_IMPLICATION_ITEMS_PER_GROUP = 10;
     private const MIN_ACTION_AREAS = 6;
     private const MIN_ACTION_ITEMS_PER_AREA = 10;
     private const REQUIRED_IMPLICATION_GROUP_KEYS = [
@@ -214,17 +214,10 @@ class SwotAnalysisService
             $brainResponse,
             $structuredAnswer
         ): SwotAnalysis {
-            $analysis = SwotAnalysis::query()
-                ->where('customer_uuid', $customerUuid)
-                ->orderByDesc('generated_at')
-                ->orderByDesc('created_at')
-                ->lockForUpdate()
-                ->first();
-
-            if (! $analysis) {
-                $analysis = new SwotAnalysis();
-                $analysis->customer_uuid = $customerUuid;
-            }
+            // Keep full history: each sync/generation creates a new analysis row.
+            // Previous analyses (including manual edits) stay preserved.
+            $analysis = new SwotAnalysis();
+            $analysis->customer_uuid = $customerUuid;
 
             $analysis->fill([
                 'trend_analysis_run_id' => $trendAnalysisRunId,
@@ -1668,7 +1661,7 @@ class SwotAnalysisService
             'Gere somente o bloco strategic_implications.',
             'Regras obrigatorias:',
             '- Obrigatorio 4 grupos: so-accelerate, st-defend, wo-invest, wt-mitigate.',
-            '- Minimo 3 items por grupo.',
+            '- Minimo 10 items por grupo.',
             '- Cada item: id, title, factor_ref, scenario_ref, source_name, source_url.',
             '- Tons validos: strength, opportunity, weakness, threat.',
             'Schema de resposta:',
