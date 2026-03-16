@@ -15,6 +15,9 @@ use RuntimeException;
 
 class SwotAnalysisService
 {
+    private const HISTORICAL_CARD_ITEMS_PER_ANALYSIS = 3;
+    private const HISTORICAL_TABLE_ITEMS_PER_ANALYSIS = 10;
+
     private const FACTOR_CARD_DEFINITIONS = [
         'strengths' => [
             'card_key' => 'factors.strengths',
@@ -1076,12 +1079,10 @@ class SwotAnalysisService
             }
 
             $items = $historicalGroupCards
-                ->flatMap(function (SwotCard $historicalCard) {
-                    return $historicalCard->items
-                        ->whereNull('deleted_at')
-                        ->sortBy('sort_order')
-                        ->values();
-                })
+                ->flatMap(fn (SwotCard $historicalCard) => $this->sliceHistoricalCardItems(
+                    $historicalCard,
+                    self::HISTORICAL_CARD_ITEMS_PER_ANALYSIS
+                ))
                 ->map(function (SwotCardItem $item) use ($sourceCatalog): array {
                     $source = $this->resolveSourceReference(
                         Arr::get($item->metadata ?? [], 'source_name'),
@@ -1141,12 +1142,10 @@ class SwotAnalysisService
             }
 
             $items = $historicalGroupCards
-                ->flatMap(function (SwotCard $historicalCard) {
-                    return $historicalCard->items
-                        ->whereNull('deleted_at')
-                        ->sortBy('sort_order')
-                        ->values();
-                })
+                ->flatMap(fn (SwotCard $historicalCard) => $this->sliceHistoricalCardItems(
+                    $historicalCard,
+                    self::HISTORICAL_CARD_ITEMS_PER_ANALYSIS
+                ))
                 ->map(function (SwotCardItem $item) use ($sourceCatalog): array {
                     $source = $this->resolveSourceReference(
                         Arr::get($item->metadata ?? [], 'source_name'),
@@ -1189,12 +1188,10 @@ class SwotAnalysisService
                 'area_key' => $areaKey,
                 'title' => $card?->title ?? $definition['title'],
                 'items' => $historicalGroupCards
-                    ->flatMap(function (SwotCard $historicalCard) {
-                        return $historicalCard->items
-                            ->whereNull('deleted_at')
-                            ->sortBy('sort_order')
-                            ->values();
-                    })
+                    ->flatMap(fn (SwotCard $historicalCard) => $this->sliceHistoricalCardItems(
+                        $historicalCard,
+                        self::HISTORICAL_TABLE_ITEMS_PER_ANALYSIS
+                    ))
                     ->map(function (SwotCardItem $item) use ($sourceCatalog): array {
                         $source = $this->resolveSourceReference(
                             Arr::get($item->metadata ?? [], 'source_name'),
@@ -1301,6 +1298,19 @@ class SwotAnalysisService
             ->orderBy('swot_cards.sort_order')
             ->get()
             ->groupBy('card_key');
+    }
+
+    /**
+     * @return \Illuminate\Support\Collection<int, SwotCardItem>
+     */
+    private function sliceHistoricalCardItems(SwotCard $card, int $limit)
+    {
+        return $card->items
+            ->whereNull('deleted_at')
+            ->sortBy('sort_order')
+            ->values()
+            ->slice(0, max(1, $limit))
+            ->values();
     }
 
     /**
