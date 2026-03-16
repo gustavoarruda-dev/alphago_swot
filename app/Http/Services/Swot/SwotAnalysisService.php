@@ -1039,6 +1039,7 @@ class SwotAnalysisService
             ->whereNull('deleted_at')
             ->sortBy('sort_order')
             ->values();
+        $historicalCards = $this->loadHistoricalCardsForCustomer($analysis);
 
         $topFactorsLimit = $this->normalizePositiveInt($options['top_factors_limit'] ?? null);
         $bottomFactorsLimit = $this->normalizePositiveInt($options['bottom_factors_limit'] ?? null);
@@ -1065,18 +1066,22 @@ class SwotAnalysisService
         foreach (self::FACTOR_CARD_DEFINITIONS as $quadrant => $definition) {
             /** @var SwotCard|null $card */
             $card = $cards->firstWhere('card_key', $definition['card_key']);
+            $historicalGroupCards = $historicalCards->get($definition['card_key'], collect());
             $factorSections[$quadrant] = [
                 'title' => $card?->title ?: $definition['title'],
                 'subtitle' => $card?->subtitle ?: ($definition['subtitle'] ?? ''),
             ];
-            if (! $card) {
+            if ($historicalGroupCards->isEmpty()) {
                 continue;
             }
 
-            $items = $card->items
-                ->whereNull('deleted_at')
-                ->sortBy('sort_order')
-                ->values()
+            $items = $historicalGroupCards
+                ->flatMap(function (SwotCard $historicalCard) {
+                    return $historicalCard->items
+                        ->whereNull('deleted_at')
+                        ->sortBy('sort_order')
+                        ->values();
+                })
                 ->map(function (SwotCardItem $item) use ($sourceCatalog): array {
                     $source = $this->resolveSourceReference(
                         Arr::get($item->metadata ?? [], 'source_name'),
@@ -1126,18 +1131,22 @@ class SwotAnalysisService
         foreach (self::RECOMMENDATION_CARD_DEFINITIONS as $bucket => $definition) {
             /** @var SwotCard|null $card */
             $card = $cards->firstWhere('card_key', $definition['card_key']);
+            $historicalGroupCards = $historicalCards->get($definition['card_key'], collect());
             $recommendationSections[$bucket] = [
                 'title' => $card?->title ?: $definition['title'],
                 'subtitle' => $card?->subtitle ?: ($definition['subtitle'] ?? ''),
             ];
-            if (! $card) {
+            if ($historicalGroupCards->isEmpty()) {
                 continue;
             }
 
-            $items = $card->items
-                ->whereNull('deleted_at')
-                ->sortBy('sort_order')
-                ->values()
+            $items = $historicalGroupCards
+                ->flatMap(function (SwotCard $historicalCard) {
+                    return $historicalCard->items
+                        ->whereNull('deleted_at')
+                        ->sortBy('sort_order')
+                        ->values();
+                })
                 ->map(function (SwotCardItem $item) use ($sourceCatalog): array {
                     $source = $this->resolveSourceReference(
                         Arr::get($item->metadata ?? [], 'source_name'),
@@ -1170,18 +1179,22 @@ class SwotAnalysisService
         foreach (self::ACTION_PLAN_CARD_DEFINITIONS as $areaKey => $definition) {
             /** @var SwotCard|null $card */
             $card = $cards->firstWhere('card_key', $definition['card_key']);
-            if (! $card) {
+            $historicalGroupCards = $historicalCards->get($definition['card_key'], collect());
+            if ($historicalGroupCards->isEmpty()) {
                 continue;
             }
 
             $actionPlan[] = [
-                'id' => $card->uuid,
+                'id' => $card?->uuid ?? $definition['card_key'],
                 'area_key' => $areaKey,
-                'title' => $card->title,
-                'items' => $card->items
-                    ->whereNull('deleted_at')
-                    ->sortBy('sort_order')
-                    ->values()
+                'title' => $card?->title ?? $definition['title'],
+                'items' => $historicalGroupCards
+                    ->flatMap(function (SwotCard $historicalCard) {
+                        return $historicalCard->items
+                            ->whereNull('deleted_at')
+                            ->sortBy('sort_order')
+                            ->values();
+                    })
                     ->map(function (SwotCardItem $item) use ($sourceCatalog): array {
                         $source = $this->resolveSourceReference(
                             Arr::get($item->metadata ?? [], 'source_name'),
@@ -1216,6 +1229,10 @@ class SwotAnalysisService
             $strategicImplications = $this->applySourceCatalogToStrategicImplications(
                 $strategicImplications,
                 $sourceCatalog
+            );
+            $strategicImplications = $this->limitStrategicImplicationItems(
+                $strategicImplications,
+                3
             );
             $strategicNote = $this->sanitizeString($rawStructured['strategic_note'] ?? null) ?? '';
         }
@@ -1265,6 +1282,25 @@ class SwotAnalysisService
                 ],
             ],
         ];
+    }
+
+    /**
+     * @return \Illuminate\Support\Collection<string, \Illuminate\Support\Collection<int, SwotCard>>
+     */
+    private function loadHistoricalCardsForCustomer(SwotAnalysis $analysis)
+    {
+        return SwotCard::query()
+            ->select('swot_cards.*')
+            ->join('swot_analyses', 'swot_analyses.id', '=', 'swot_cards.analysis_id')
+            ->where('swot_analyses.customer_uuid', $analysis->customer_uuid)
+            ->whereNull('swot_analyses.deleted_at')
+            ->whereNull('swot_cards.deleted_at')
+            ->with(['items' => fn ($query) => $query->whereNull('deleted_at')->orderBy('sort_order')])
+            ->orderByDesc('swot_analyses.generated_at')
+            ->orderByDesc('swot_analyses.created_at')
+            ->orderBy('swot_cards.sort_order')
+            ->get()
+            ->groupBy('card_key');
     }
 
     /**
@@ -2997,6 +3033,30 @@ class SwotAnalysisService
             }
 
             $group['items'] = $resolvedItems;
+            $normalized[] = $group;
+        }
+
+        return $normalized;
+    }
+
+    private function limitStrategicImplicationItems(array $groups, int $limit): array
+    {
+        if ($limit < 1) {
+            return $groups;
+        }
+
+        $normalized = [];
+        foreach ($groups as $group) {
+            if (! is_array($group)) {
+                continue;
+            }
+
+            $items = $group['items'] ?? [];
+            if (! is_array($items)) {
+                $items = [];
+            }
+
+            $group['items'] = array_values(array_slice($items, 0, $limit));
             $normalized[] = $group;
         }
 
