@@ -118,8 +118,7 @@ class SwotAnalysisService
     ];
 
     private const REQUIRED_GENERATION_TOOLS = [
-        'search_clipping',
-        'search_social_listening',
+        'search_swot_generation_context',
         'search_web_market',
     ];
 
@@ -633,6 +632,7 @@ class SwotAnalysisService
                 'origin' => 'manual',
                 'source_name' => $sourceName,
                 'source_url' => $sourceUrl,
+                'sources' => $this->normalizeSourceReferences($payload['sources'] ?? []),
             ],
         ]);
 
@@ -824,6 +824,9 @@ class SwotAnalysisService
         if ($sourceUrlProvided) {
             $metadata['source_url'] = $sourceUrl;
         }
+        if (array_key_exists('sources', $payload)) {
+            $metadata['sources'] = $this->normalizeSourceReferences($payload['sources'] ?? []);
+        }
 
         $item->metadata = $metadata;
     }
@@ -876,6 +879,7 @@ class SwotAnalysisService
                         'origin' => 'ai',
                         'source_name' => $this->sanitizeSourceName($item['source_name'] ?? null),
                         'source_url' => $this->normalizeExternalUrl($item['source_url'] ?? $item['swot_link'] ?? null),
+                        'sources' => $this->normalizeSourceReferences($item['sources'] ?? []),
                     ],
                 ]);
             }
@@ -917,6 +921,7 @@ class SwotAnalysisService
                         'origin' => 'ai',
                         'source_name' => $this->sanitizeSourceName($item['source_name'] ?? null),
                         'source_url' => $this->normalizeExternalUrl($item['source_url'] ?? $item['swot_link'] ?? null),
+                        'sources' => $this->normalizeSourceReferences($item['sources'] ?? []),
                     ],
                 ]);
             }
@@ -980,6 +985,7 @@ class SwotAnalysisService
                         'origin' => 'ai',
                         'source_name' => $this->sanitizeSourceName($item['source_name'] ?? null),
                         'source_url' => $this->normalizeExternalUrl($item['source_url'] ?? $item['swot_link'] ?? null),
+                        'sources' => $this->normalizeSourceReferences($item['sources'] ?? []),
                     ],
                 ]);
             }
@@ -1051,6 +1057,18 @@ class SwotAnalysisService
             (string) $analysis->customer_uuid,
             $this->sanitizeString($analysis->trend_analysis_run_id)
         );
+        $analysisWideSources = array_values(array_map(
+            fn (array $source): array => [
+                'source_name' => $this->sanitizeSourceName($source['source_name'] ?? null),
+                'source_url' => $this->normalizeExternalUrl($source['source_url'] ?? null),
+                'source_origin' => $this->sanitizeString($source['source_origin'] ?? null),
+                'source_category' => $this->sanitizeString($source['source_category'] ?? null),
+            ],
+            array_filter(
+                $sourceCatalog['ordered'] ?? [],
+                static fn (mixed $source): bool => is_array($source)
+            )
+        ));
 
         $factors = [
             'strengths' => [],
@@ -1083,8 +1101,15 @@ class SwotAnalysisService
                     $historicalCard,
                     self::HISTORICAL_CARD_ITEMS_PER_ANALYSIS
                 ))
-                ->map(function (SwotCardItem $item) use ($sourceCatalog): array {
-                    $source = $this->resolveSourceReference(
+                ->map(function (SwotCardItem $item) use ($sourceCatalog, $analysisWideSources): array {
+                    $sources = $this->resolveSourceReferencesList(
+                        Arr::get($item->metadata ?? [], 'sources'),
+                        Arr::get($item->metadata ?? [], 'source_name'),
+                        $item->swot_link ?: Arr::get($item->metadata ?? [], 'source_url'),
+                        $sourceCatalog,
+                        $analysisWideSources
+                    );
+                    $primarySource = $sources[0] ?? $this->resolveSourceReference(
                         Arr::get($item->metadata ?? [], 'source_name'),
                         $item->swot_link ?: Arr::get($item->metadata ?? [], 'source_url'),
                         $sourceCatalog
@@ -1098,10 +1123,11 @@ class SwotAnalysisService
                         'priority' => $item->priority,
                         'impact' => $item->impact,
                         'dimension' => $item->dimension,
-                        'source_url' => $source['source_url'],
-                        'source_name' => $source['source_name'],
-                        'source_origin' => $source['source_origin'],
-                        'source_category' => $source['source_category'],
+                        'source_url' => $primarySource['source_url'],
+                        'source_name' => $primarySource['source_name'],
+                        'source_origin' => $primarySource['source_origin'],
+                        'source_category' => $primarySource['source_category'],
+                        'sources' => $sources,
                     ];
                 })
                 ->all();
@@ -1146,8 +1172,15 @@ class SwotAnalysisService
                     $historicalCard,
                     self::HISTORICAL_CARD_ITEMS_PER_ANALYSIS
                 ))
-                ->map(function (SwotCardItem $item) use ($sourceCatalog): array {
-                    $source = $this->resolveSourceReference(
+                ->map(function (SwotCardItem $item) use ($sourceCatalog, $analysisWideSources): array {
+                    $sources = $this->resolveSourceReferencesList(
+                        Arr::get($item->metadata ?? [], 'sources'),
+                        Arr::get($item->metadata ?? [], 'source_name'),
+                        $item->swot_link ?: Arr::get($item->metadata ?? [], 'source_url'),
+                        $sourceCatalog,
+                        $analysisWideSources
+                    );
+                    $primarySource = $sources[0] ?? $this->resolveSourceReference(
                         Arr::get($item->metadata ?? [], 'source_name'),
                         $item->swot_link ?: Arr::get($item->metadata ?? [], 'source_url'),
                         $sourceCatalog
@@ -1158,10 +1191,11 @@ class SwotAnalysisService
                         'title' => $item->title,
                         'priority' => $item->priority,
                         'period_label' => $item->period,
-                        'source_url' => $source['source_url'],
-                        'source_name' => $source['source_name'],
-                        'source_origin' => $source['source_origin'],
-                        'source_category' => $source['source_category'],
+                        'source_url' => $primarySource['source_url'],
+                        'source_name' => $primarySource['source_name'],
+                        'source_origin' => $primarySource['source_origin'],
+                        'source_category' => $primarySource['source_category'],
+                        'sources' => $sources,
                     ];
                 })
                 ->all();
@@ -1192,8 +1226,15 @@ class SwotAnalysisService
                         $historicalCard,
                         self::HISTORICAL_TABLE_ITEMS_PER_ANALYSIS
                     ))
-                    ->map(function (SwotCardItem $item) use ($sourceCatalog): array {
-                        $source = $this->resolveSourceReference(
+                    ->map(function (SwotCardItem $item) use ($sourceCatalog, $analysisWideSources): array {
+                        $sources = $this->resolveSourceReferencesList(
+                            Arr::get($item->metadata ?? [], 'sources'),
+                            Arr::get($item->metadata ?? [], 'source_name'),
+                            $item->swot_link ?: Arr::get($item->metadata ?? [], 'source_url'),
+                            $sourceCatalog,
+                            $analysisWideSources
+                        );
+                        $primarySource = $sources[0] ?? $this->resolveSourceReference(
                             Arr::get($item->metadata ?? [], 'source_name'),
                             $item->swot_link ?: Arr::get($item->metadata ?? [], 'source_url'),
                             $sourceCatalog
@@ -1202,10 +1243,11 @@ class SwotAnalysisService
                         return [
                             'id' => $item->uuid,
                             'strategic_action' => $item->title,
-                            'swot_link' => $source['source_url'],
-                            'source_name' => $source['source_name'],
-                            'source_origin' => $source['source_origin'],
-                            'source_category' => $source['source_category'],
+                            'swot_link' => $primarySource['source_url'],
+                            'source_name' => $primarySource['source_name'],
+                            'source_origin' => $primarySource['source_origin'],
+                            'source_category' => $primarySource['source_category'],
+                            'sources' => $sources,
                             'period' => $item->period,
                             'kpi' => $item->kpi,
                             'owner' => $item->owner,
@@ -1225,7 +1267,8 @@ class SwotAnalysisService
             );
             $strategicImplications = $this->applySourceCatalogToStrategicImplications(
                 $strategicImplications,
-                $sourceCatalog
+                $sourceCatalog,
+                $analysisWideSources
             );
             $strategicImplications = $this->limitStrategicImplicationItems(
                 $strategicImplications,
@@ -1397,6 +1440,29 @@ class SwotAnalysisService
         $conversationId = $actionPlanBlock['conversation_id'];
         $toolsSeen = $actionPlanBlock['tools_seen'];
         $blockResponses[] = ['block' => 'action_plan', 'response' => $actionPlanBlock['response']];
+        $actionPlan = $this->normalizeActionPlan($actionPlanBlock['json']['action_plan'] ?? $actionPlanBlock['json']);
+        if (! $this->isActionPlanStructurallyComplete($actionPlan)) {
+            $actionPlanBlock = $this->requestSwotJsonBlock(
+                $customerUuid,
+                $brainFilters,
+                $conversationId,
+                $toolsSeen,
+                'action_plan',
+                $this->buildSwotActionPlanBlockPrompt()."\n\n".$this->buildBlockCompletenessPrompt(
+                    'action_plan',
+                    [
+                        'Retorne obrigatoriamente as 6 areas fixas exigidas.',
+                        'Cada area precisa conter no minimo 10 items validos.',
+                        'Nao omita areas mesmo quando houver pouca evidencia; use o corpus interno consolidado e complemente com web market apenas quando necessário.',
+                    ]
+                ),
+                '{"action_plan":[{"area_key":"...","title":"...","items":[...]}]}'
+            );
+            $conversationId = $actionPlanBlock['conversation_id'];
+            $toolsSeen = $actionPlanBlock['tools_seen'];
+            $blockResponses[] = ['block' => 'action_plan-retry', 'response' => $actionPlanBlock['response']];
+            $actionPlan = $this->normalizeActionPlan($actionPlanBlock['json']['action_plan'] ?? $actionPlanBlock['json']);
+        }
 
         $implicationsBlock = $this->requestSwotJsonBlock(
             $customerUuid,
@@ -1410,14 +1476,37 @@ class SwotAnalysisService
         $conversationId = $implicationsBlock['conversation_id'];
         $toolsSeen = $implicationsBlock['tools_seen'];
         $blockResponses[] = ['block' => 'strategic_implications', 'response' => $implicationsBlock['response']];
+        $strategicImplications = $this->normalizeStrategicImplications(
+            $implicationsBlock['json']['strategic_implications'] ?? $implicationsBlock['json']
+        );
+        if (! $this->isStrategicImplicationsStructurallyComplete($strategicImplications)) {
+            $implicationsBlock = $this->requestSwotJsonBlock(
+                $customerUuid,
+                $brainFilters,
+                $conversationId,
+                $toolsSeen,
+                'strategic_implications',
+                $this->buildSwotStrategicImplicationsBlockPrompt()."\n\n".$this->buildBlockCompletenessPrompt(
+                    'strategic_implications',
+                    [
+                        'Retorne obrigatoriamente os 4 grupos fixos: so-accelerate, st-defend, wo-invest, wt-mitigate.',
+                        'Cada grupo precisa conter no minimo 10 items validos.',
+                        'Nao colapse grupos e nao devolva grupos vazios.',
+                    ]
+                ),
+                '{"strategic_implications":[{"id":"so-accelerate|st-defend|wo-invest|wt-mitigate","items":[...]}]}'
+            );
+            $conversationId = $implicationsBlock['conversation_id'];
+            $toolsSeen = $implicationsBlock['tools_seen'];
+            $blockResponses[] = ['block' => 'strategic_implications-retry', 'response' => $implicationsBlock['response']];
+            $strategicImplications = $this->normalizeStrategicImplications(
+                $implicationsBlock['json']['strategic_implications'] ?? $implicationsBlock['json']
+            );
+        }
 
         $overview = $this->normalizeOverviewBlock($overviewBlock['json']);
         $factors = $this->normalizeFactorsBlock($factorsBlock['json']);
         $recommendations = $this->normalizeRecommendationsBlock($recommendationsBlock['json']);
-        $actionPlan = $this->normalizeActionPlan($actionPlanBlock['json']['action_plan'] ?? $actionPlanBlock['json']);
-        $strategicImplications = $this->normalizeStrategicImplications(
-            $implicationsBlock['json']['strategic_implications'] ?? $implicationsBlock['json']
-        );
 
         $structuredAnswer = [
             'analysis_summary' => $overview['analysis_summary'],
@@ -1598,6 +1687,74 @@ class SwotAnalysisService
     }
 
     /**
+     * @param array<int, array<string, mixed>> $actionPlan
+     */
+    private function isActionPlanStructurallyComplete(array $actionPlan): bool
+    {
+        if (count($actionPlan) < self::MIN_ACTION_AREAS) {
+            return false;
+        }
+
+        $areas = [];
+        foreach ($actionPlan as $entry) {
+            if (! is_array($entry)) {
+                return false;
+            }
+            $areaKey = $this->sanitizeString($entry['area_key'] ?? null);
+            if ($areaKey === null) {
+                return false;
+            }
+            $areas[$areaKey] = true;
+            $items = $entry['items'] ?? [];
+            if (! is_array($items) || count($items) < self::MIN_ACTION_ITEMS_PER_AREA) {
+                return false;
+            }
+        }
+
+        foreach (array_keys(self::ACTION_PLAN_CARD_DEFINITIONS) as $requiredArea) {
+            if (! isset($areas[$requiredArea])) {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    /**
+     * @param array<int, array<string, mixed>> $groups
+     */
+    private function isStrategicImplicationsStructurallyComplete(array $groups): bool
+    {
+        if (count($groups) < self::MIN_IMPLICATION_GROUPS) {
+            return false;
+        }
+
+        $groupIds = [];
+        foreach ($groups as $group) {
+            if (! is_array($group)) {
+                return false;
+            }
+            $id = $this->sanitizeString($group['id'] ?? null);
+            if ($id === null) {
+                return false;
+            }
+            $groupIds[$id] = true;
+            $items = $group['items'] ?? [];
+            if (! is_array($items) || count($items) < self::MIN_IMPLICATION_ITEMS_PER_GROUP) {
+                return false;
+            }
+        }
+
+        foreach (self::REQUIRED_IMPLICATION_GROUP_KEYS as $requiredGroup) {
+            if (! isset($groupIds[$requiredGroup])) {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    /**
      * @param array<int, string> $missingTools
      * @param array<int, string> $qualityIssues
      */
@@ -1638,8 +1795,10 @@ class SwotAnalysisService
             $basePrompt,
             '',
             'Regras obrigatorias:',
-            '- Execute obrigatoriamente: search_clipping, search_social_listening e search_web_market.',
-            '- Mesmo com clipping/social vazios, complete com evidencias de web market.',
+            '- Execute obrigatoriamente: search_swot_generation_context e search_web_market.',
+            '- Use search_swot_generation_context como corpus interno principal, cobrindo o conjunto das fontes elegiveis no banco.',
+            '- Use search_clipping e search_social_listening apenas para aprofundar lacunas pontuais, quando realmente necessario.',
+            '- Mesmo com corpus interno insuficiente, complete com evidencias de web market.',
             '- Minimo 3 itens em strengths, opportunities, weaknesses e threats.',
             '- Cada item deve conter: title, description, priority, impact, tag, dimension, source_name, source_url.',
             '- source_url deve ser URL externa HTTP/HTTPS valida.',
@@ -1726,6 +1885,24 @@ class SwotAnalysisService
             'Use texto conciso nos campos para evitar truncamento (frases curtas e sem prolixidade).',
             'Erro de parse: '.$parseIssue,
         ]);
+    }
+
+    /**
+     * @param array<int, string> $rules
+     */
+    private function buildBlockCompletenessPrompt(string $blockId, array $rules): string
+    {
+        $lines = [
+            '[REFORCO DE COMPLETUDE]',
+            sprintf('O bloco "%s" anterior veio estruturalmente incompleto.', $blockId),
+            'Refaca SOMENTE este bloco, mantendo JSON valido e o schema exato pedido.',
+        ];
+
+        foreach ($rules as $rule) {
+            $lines[] = '- '.$rule;
+        }
+
+        return implode("\n", $lines);
     }
 
     /**
@@ -2641,6 +2818,7 @@ class SwotAnalysisService
                 'strategic_action' => $this->sanitizeString($item['strategic_action'] ?? null),
                 'swot_link' => $this->normalizeExternalUrl($item['source_url'] ?? $item['swot_link'] ?? null),
                 'source_name' => $this->sanitizeSourceName($item['source_name'] ?? $item['source'] ?? null),
+                'sources' => $this->normalizeSourceReferences($item['sources'] ?? []),
                 'kpi' => $this->sanitizeString($item['kpi'] ?? null),
                 'owner' => $this->sanitizeString($item['owner'] ?? null),
             ];
@@ -2707,6 +2885,7 @@ class SwotAnalysisService
                 'strategic_action' => $strategicAction,
                 'swot_link' => $this->normalizeExternalUrl($item['source_url'] ?? $item['swot_link'] ?? null),
                 'source_name' => $this->sanitizeSourceName($item['source_name'] ?? $item['source'] ?? null),
+                'sources' => $this->normalizeSourceReferences($item['sources'] ?? []),
                 'period' => $this->sanitizeString($item['period'] ?? null),
                 'kpi' => $this->sanitizeString($item['kpi'] ?? null),
                 'owner' => $this->sanitizeString($item['owner'] ?? null),
@@ -2782,6 +2961,7 @@ class SwotAnalysisService
                     'scenario_ref' => $scenarioRef,
                     'source_url' => $this->normalizeExternalUrl($item['source_url'] ?? null),
                     'source_name' => $this->sanitizeSourceName($item['source_name'] ?? $item['source'] ?? null),
+                    'sources' => $this->normalizeSourceReferences($item['sources'] ?? []),
                 ];
             }
 
@@ -2966,7 +3146,13 @@ class SwotAnalysisService
                 continue;
             }
 
-            $source = $this->resolveSourceReference(
+            $sources = $this->resolveSourceReferencesList(
+                $item['sources'] ?? [],
+                $item['source_name'] ?? null,
+                $item['swot_link'] ?? $item['source_url'] ?? null,
+                $sourceCatalog
+            );
+            $source = $sources[0] ?? $this->resolveSourceReference(
                 $item['source_name'] ?? null,
                 $item['swot_link'] ?? $item['source_url'] ?? null,
                 $sourceCatalog
@@ -2975,6 +3161,7 @@ class SwotAnalysisService
             $item['source_name'] = $source['source_name'];
             $item['source_url'] = $source['source_url'];
             $item['swot_link'] = $source['source_url'];
+            $item['sources'] = $sources;
 
             $normalized[] = $item;
         }
@@ -3012,7 +3199,11 @@ class SwotAnalysisService
      * @param array<string, mixed> $sourceCatalog
      * @return array<int, array<string, mixed>>
      */
-    private function applySourceCatalogToStrategicImplications(array $groups, array $sourceCatalog): array
+    private function applySourceCatalogToStrategicImplications(
+        array $groups,
+        array $sourceCatalog,
+        array $analysisWideSources = []
+    ): array
     {
         $normalized = [];
         foreach ($groups as $group) {
@@ -3031,7 +3222,14 @@ class SwotAnalysisService
                     continue;
                 }
 
-                $source = $this->resolveSourceReference(
+                $sources = $this->resolveSourceReferencesList(
+                    $item['sources'] ?? [],
+                    $item['source_name'] ?? null,
+                    $item['source_url'] ?? null,
+                    $sourceCatalog,
+                    $analysisWideSources
+                );
+                $source = $sources[0] ?? $this->resolveSourceReference(
                     $item['source_name'] ?? null,
                     $item['source_url'] ?? null,
                     $sourceCatalog
@@ -3039,6 +3237,7 @@ class SwotAnalysisService
 
                 $item['source_name'] = $source['source_name'];
                 $item['source_url'] = $source['source_url'];
+                $item['sources'] = $sources;
                 $resolvedItems[] = $item;
             }
 
@@ -3119,6 +3318,99 @@ class SwotAnalysisService
             'source_origin' => $this->sanitizeString($matchedSource['source_origin'] ?? null),
             'source_category' => $this->sanitizeString($matchedSource['source_category'] ?? null),
         ];
+    }
+
+    /**
+     * @param mixed $sources
+     * @return array<int, array<string, string|null>>
+     */
+    private function normalizeSourceReferences(mixed $sources): array
+    {
+        if (! is_array($sources)) {
+            return [];
+        }
+
+        $normalized = [];
+        $seen = [];
+        foreach ($sources as $source) {
+            if (! is_array($source)) {
+                continue;
+            }
+
+            $sourceName = $this->sanitizeSourceName($source['source_name'] ?? $source['label'] ?? $source['source'] ?? null);
+            $sourceUrl = $this->normalizeExternalUrl($source['source_url'] ?? $source['url'] ?? $source['link'] ?? null);
+            if ($sourceName === null && $sourceUrl === null) {
+                continue;
+            }
+
+            $key = mb_strtolower(($sourceName ?? '').'|'.($sourceUrl ?? ''));
+            if (isset($seen[$key])) {
+                continue;
+            }
+            $seen[$key] = true;
+
+            $normalized[] = [
+                'source_name' => $sourceName,
+                'source_url' => $sourceUrl,
+            ];
+        }
+
+        return $normalized;
+    }
+
+    /**
+     * @param mixed $sources
+     * @return array<int, array<string, string|null>>
+     */
+    private function resolveSourceReferencesList(
+        mixed $sources,
+        mixed $fallbackSourceName,
+        mixed $fallbackSourceUrl,
+        array $sourceCatalog,
+        array $analysisWideSources = []
+    ): array {
+        $normalized = [];
+        $seen = [];
+
+        foreach ($this->normalizeSourceReferences($sources) as $source) {
+            $resolved = $this->resolveSourceReference(
+                $source['source_name'] ?? null,
+                $source['source_url'] ?? null,
+                $sourceCatalog
+            );
+            $key = mb_strtolower(($resolved['source_name'] ?? '').'|'.($resolved['source_url'] ?? ''));
+            if ($key === '|' || isset($seen[$key])) {
+                continue;
+            }
+            $seen[$key] = true;
+            $normalized[] = $resolved;
+        }
+
+        $fallback = $this->resolveSourceReference($fallbackSourceName, $fallbackSourceUrl, $sourceCatalog);
+        $fallbackKey = mb_strtolower(($fallback['source_name'] ?? '').'|'.($fallback['source_url'] ?? ''));
+        if ($fallbackKey !== '|' && ! isset($seen[$fallbackKey])) {
+            $normalized[] = $fallback;
+            $seen[$fallbackKey] = true;
+        }
+
+        foreach ($analysisWideSources as $source) {
+            if (! is_array($source)) {
+                continue;
+            }
+            $resolved = $this->resolveSourceReference(
+                $source['source_name'] ?? null,
+                $source['source_url'] ?? null,
+                $sourceCatalog
+            );
+            $key = mb_strtolower(($resolved['source_name'] ?? '').'|'.($resolved['source_url'] ?? ''));
+            if ($key === '|' || isset($seen[$key])) {
+                continue;
+            }
+            $seen[$key] = true;
+            $normalized[] = $resolved;
+        }
+
+        return $normalized;
     }
 
     private function sanitizeSourceName(mixed $value): ?string
