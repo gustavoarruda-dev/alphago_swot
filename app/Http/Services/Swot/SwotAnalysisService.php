@@ -1127,6 +1127,7 @@ class SwotAnalysisService
 
                     return [
                         'id' => $item->uuid,
+                        'item_key' => $this->sanitizeString(Arr::get($item->metadata ?? [], 'item_key')),
                         'title' => $item->title,
                         'description' => $item->description,
                         'tag' => $item->tag,
@@ -1295,6 +1296,10 @@ class SwotAnalysisService
         if (is_array($rawStructured)) {
             $strategicImplications = $this->normalizeStrategicImplications(
                 $rawStructured['strategic_implications'] ?? []
+            );
+            $strategicImplications = $this->applyFactorCatalogToStrategicImplications(
+                $strategicImplications,
+                $factorReferenceCatalog
             );
             $strategicImplications = $this->applySourceCatalogToStrategicImplications(
                 $strategicImplications,
@@ -2004,6 +2009,8 @@ class SwotAnalysisService
 
     private function buildSwotActionPlanAreaBlockPrompt(string $areaKey, string $areaTitle, string $contextSnapshot): string
     {
+        $guidance = $this->buildActionPlanAreaSemanticGuidance($areaKey);
+
         return implode("\n", [
             '[SWOT BLOCK | ACTION_PLAN_AREA]',
             'Retorne APENAS JSON valido (sem markdown e sem texto fora do JSON).',
@@ -2022,9 +2029,56 @@ class SwotAnalysisService
             '- swot_references deve ter 1 ou 2 referencias reais da matriz SWOT ja gerada.',
             '- quadrant valido: strength, opportunity, weakness, threat.',
             '- source_url deve ser URL externa HTTP/HTTPS valida.',
+            '- strategic_action deve ser uma acao concreta e executavel, sem texto genérico.',
+            '- kpi deve ser mensurável, objetivo e ligado diretamente ao resultado da acao.',
+            '- owner deve ser coerente com a area e com a natureza da acao.',
+            '- period deve refletir urgência e esforço esperado (ex: Q1, Q1-Q2, Q2-Q3, Q3-Q4).',
+            '- priority deve refletir impacto estratégico e urgência real (Crítica, Alta, Média, Baixa).',
+            '- Evite KPI vago como "melhorar performance"; prefira metas como "reduzir SLA", "aumentar taxa", "fechar contratos", "elevar receita", "reduzir churn", etc.',
+            '- Evite owner genérico como "time"; use papel executivo ou liderança responsável.',
+            '',
+            '[GUIA DE SEMANTICA DA AREA]',
+            $guidance,
             'Schema de resposta:',
             '{"action_plan":{"'.$areaKey.'":{"title":"'.$areaTitle.'","items":[{"strategic_action":"string","swot_references":[{"quadrant":"strength|opportunity|weakness|threat","title":"string"}],"source_name":"string","source_url":"https://...","period":"string","kpi":"string","owner":"string","priority":"Critica|Alta|Media|Baixa"}]}}}',
         ]);
+    }
+
+    private function buildActionPlanAreaSemanticGuidance(string $areaKey): string
+    {
+        return match ($areaKey) {
+            'technology-product' => implode("\n", [
+                '- Foque em produto, plataforma, integrações, arquitetura, IA aplicada, onboarding técnico e entrega digital.',
+                '- Owners esperados: CTO, Head de Produto, VP Engenharia, Tech Lead.',
+                '- KPI esperado: redução de latência, lançamento de MVP, tempo de integração, conversão de onboarding, adoção de feature.',
+            ]),
+            'commercial-marketing' => implode("\n", [
+                '- Foque em aquisição, posicionamento, pipeline, conversão, canais, geração de demanda e receita.',
+                '- Owners esperados: CMO, Head Comercial, VP Comercial, Head Vendas.',
+                '- KPI esperado: contratos fechados, pipeline, receita incremental, CAC, taxa de conversão, leads qualificados.',
+            ]),
+            'operations-support' => implode("\n", [
+                '- Foque em operação, SLA, suporte, processos, eficiência, qualidade e redução de retrabalho.',
+                '- Owners esperados: COO, Head de Suporte, Head de Operações.',
+                '- KPI esperado: SLA, TMA, retrabalho, backlog, tempo de resposta, incidentes críticos.',
+            ]),
+            'finance-pricing' => implode("\n", [
+                '- Foque em margem, precificação, previsibilidade financeira, unit economics, risco e receita.',
+                '- Owners esperados: CFO, Head Financeiro, FP&A Lead.',
+                '- KPI esperado: margem, MRR/ARR, inadimplência, previsibilidade de receita, payback, receita por cliente.',
+            ]),
+            'hr-people' => implode("\n", [
+                '- Foque em pessoas, capacitação, contratação, estrutura organizacional e prontidão do time.',
+                '- Owners esperados: CHRO, Head de Pessoas, People Lead.',
+                '- KPI esperado: tempo de contratação, conclusão de trilhas, engajamento, retenção, cobertura de competências.',
+            ]),
+            'legal-compliance' => implode("\n", [
+                '- Foque em compliance, regulação, contratos, privacidade, auditoria e mitigação de exposição.',
+                '- Owners esperados: General Counsel, Compliance Lead, Jurídico.',
+                '- KPI esperado: conformidade auditada, riscos mitigados, tempo de aprovação contratual, incidentes regulatórios, cobertura de controles.',
+            ]),
+            default => '- Mantenha owner, KPI, período e prioridade totalmente coerentes com a área e a ação.',
+        };
     }
 
     /**
@@ -3642,6 +3696,7 @@ class SwotAnalysisService
         $catalog = [
             'by_code' => [],
             'by_quadrant_title' => [],
+            'by_quadrant_item_key' => [],
         ];
 
         foreach (['strengths', 'opportunities', 'weaknesses', 'threats'] as $quadrant) {
@@ -3665,14 +3720,134 @@ class SwotAnalysisService
                     'code' => $code,
                     'label' => $title,
                     'quadrant' => $quadrant,
+                    'item_key' => $this->sanitizeString($item['item_key'] ?? null),
                 ];
 
                 $catalog['by_code'][$code] = $entry;
                 $catalog['by_quadrant_title'][$quadrant.'|'.$this->normalizeReferenceLabelKey($title)] = $entry;
+                $itemKey = $this->normalizeReferenceLabelKey($entry['item_key'] ?? null);
+                if ($itemKey !== '') {
+                    $catalog['by_quadrant_item_key'][$quadrant.'|'.$itemKey] = $entry;
+                }
             }
         }
 
         return $catalog;
+    }
+
+    /**
+     * @param array<int, array<string, mixed>> $groups
+     * @param array<string, mixed> $catalog
+     * @return array<int, array<string, mixed>>
+     */
+    private function applyFactorCatalogToStrategicImplications(array $groups, array $catalog): array
+    {
+        $normalized = [];
+
+        foreach ($groups as $group) {
+            if (! is_array($group)) {
+                continue;
+            }
+
+            $firstQuadrant = $this->normalizeFactorQuadrant($group['first_factor_tone'] ?? null);
+            $secondQuadrant = $this->normalizeFactorQuadrant($group['second_factor_tone'] ?? null);
+            $items = $group['items'] ?? [];
+            if (! is_array($items)) {
+                $items = [];
+            }
+
+            $resolvedItems = [];
+            foreach ($items as $item) {
+                if (! is_array($item)) {
+                    continue;
+                }
+
+                $item['factor_ref'] = $this->formatImplicationReferenceFromCatalog(
+                    $item['factor_ref'] ?? null,
+                    $firstQuadrant,
+                    $catalog
+                );
+                $item['scenario_ref'] = $this->formatImplicationReferenceFromCatalog(
+                    $item['scenario_ref'] ?? null,
+                    $secondQuadrant,
+                    $catalog
+                );
+
+                $resolvedItems[] = $item;
+            }
+
+            $group['items'] = $resolvedItems;
+            $normalized[] = $group;
+        }
+
+        return $normalized;
+    }
+
+    private function formatImplicationReferenceFromCatalog(
+        mixed $rawReference,
+        string $expectedQuadrant,
+        array $catalog
+    ): ?string {
+        $resolved = $this->resolveImplicationReferenceEntry($rawReference, $expectedQuadrant, $catalog);
+        if (is_array($resolved)) {
+            $code = $this->sanitizeString($resolved['code'] ?? null);
+            $label = $this->sanitizeString($resolved['label'] ?? null);
+            if ($code !== null && $label !== null) {
+                return sprintf('%s: %s', $code, $label);
+            }
+        }
+
+        $fallback = $this->sanitizeString($rawReference);
+
+        return $fallback;
+    }
+
+    /**
+     * @param array<string, mixed> $catalog
+     * @return array<string, string>|null
+     */
+    private function resolveImplicationReferenceEntry(
+        mixed $rawReference,
+        string $expectedQuadrant,
+        array $catalog
+    ): ?array {
+        $reference = $this->sanitizeString($rawReference);
+        if ($reference === null) {
+            return null;
+        }
+
+        $code = $this->sanitizeSwotReferenceCode($reference);
+        if ($code !== null && isset($catalog['by_code'][$code]) && is_array($catalog['by_code'][$code])) {
+            return $catalog['by_code'][$code];
+        }
+
+        $quadrant = $expectedQuadrant;
+        $labelCandidate = $reference;
+        $splitIndex = mb_strpos($reference, ':');
+        if ($splitIndex !== false) {
+            $maybeTone = trim(mb_substr($reference, 0, $splitIndex));
+            $maybeLabel = trim(mb_substr($reference, $splitIndex + 1));
+            $normalizedTone = $this->normalizeFactorQuadrant($maybeTone);
+            if (in_array($normalizedTone, ['strengths', 'opportunities', 'weaknesses', 'threats'], true)) {
+                $quadrant = $normalizedTone;
+                $labelCandidate = $maybeLabel;
+            }
+        }
+
+        $labelKey = $this->normalizeReferenceLabelKey($labelCandidate);
+        if ($quadrant !== '' && $labelKey !== '') {
+            $titleKey = $quadrant.'|'.$labelKey;
+            if (isset($catalog['by_quadrant_title'][$titleKey]) && is_array($catalog['by_quadrant_title'][$titleKey])) {
+                return $catalog['by_quadrant_title'][$titleKey];
+            }
+
+            $itemKey = $quadrant.'|'.$labelKey;
+            if (isset($catalog['by_quadrant_item_key'][$itemKey]) && is_array($catalog['by_quadrant_item_key'][$itemKey])) {
+                return $catalog['by_quadrant_item_key'][$itemKey];
+            }
+        }
+
+        return null;
     }
 
     private function sanitizeSwotReferenceCode(mixed $value): ?string
