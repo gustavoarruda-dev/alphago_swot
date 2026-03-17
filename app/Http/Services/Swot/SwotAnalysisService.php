@@ -99,6 +99,13 @@ class SwotAnalysisService
         ],
     ];
 
+    private const FACTOR_REFERENCE_PREFIXES = [
+        'strengths' => 'S',
+        'opportunities' => 'O',
+        'weaknesses' => 'W',
+        'threats' => 'T',
+    ];
+
     private const GENERIC_INTERNAL_SOURCE_LABELS = [
         'swot interna',
         'swot interno',
@@ -757,8 +764,10 @@ class SwotAnalysisService
         $this->assertAnalysisCustomerScope($analysis, $customerUuid);
         $this->assertItemBelongsToAnalysisGroup($analysis, $item, 'action_plan');
 
-        $sourceUrlProvided = array_key_exists('source_url', $payload) || array_key_exists('swot_link', $payload);
-        $sourceUrl = $this->normalizeExternalUrl($payload['source_url'] ?? $payload['swot_link'] ?? null);
+        $sourceUrlProvided = array_key_exists('source_url', $payload);
+        $sourceUrl = $this->normalizeExternalUrl($payload['source_url'] ?? null);
+        $swotLinkProvided = array_key_exists('swot_link', $payload);
+        $swotLink = $this->sanitizeString($payload['swot_link'] ?? null);
 
         $updates = array_filter([
             'title' => $this->sanitizeString($payload['strategic_action'] ?? $payload['title'] ?? null),
@@ -767,8 +776,8 @@ class SwotAnalysisService
             'owner' => $this->sanitizeString($payload['owner'] ?? null),
             'priority' => $this->sanitizeString($payload['priority'] ?? null),
         ], static fn ($value) => $value !== null);
-        if ($sourceUrlProvided) {
-            $updates['swot_link'] = $sourceUrl;
+        if ($swotLinkProvided) {
+            $updates['swot_link'] = $swotLink;
         }
         $item->fill($updates);
 
@@ -975,7 +984,7 @@ class SwotAnalysisService
                 $card->items()->create([
                     'item_key' => $this->sanitizeString($item['item_key'] ?? null),
                     'title' => $title,
-                    'swot_link' => $this->normalizeExternalUrl($item['source_url'] ?? $item['swot_link'] ?? null),
+                    'swot_link' => $this->sanitizeString($item['swot_link'] ?? null),
                     'period' => $this->sanitizeString($item['period'] ?? null),
                     'kpi' => $this->sanitizeString($item['kpi'] ?? null),
                     'owner' => $this->sanitizeString($item['owner'] ?? null),
@@ -984,8 +993,9 @@ class SwotAnalysisService
                     'metadata' => [
                         'origin' => 'ai',
                         'source_name' => $this->sanitizeSourceName($item['source_name'] ?? null),
-                        'source_url' => $this->normalizeExternalUrl($item['source_url'] ?? $item['swot_link'] ?? null),
+                        'source_url' => $this->normalizeExternalUrl($item['source_url'] ?? null),
                         'sources' => $this->normalizeSourceReferences($item['sources'] ?? []),
+                        'swot_references' => $this->normalizeActionPlanSwotReferences($item['swot_references'] ?? []),
                     ],
                 ]);
             }
@@ -1132,6 +1142,14 @@ class SwotAnalysisService
                 })
                 ->all();
 
+            foreach ($items as $index => &$factorItem) {
+                if (! is_array($factorItem)) {
+                    continue;
+                }
+                $factorItem['reference_code'] = $this->buildFactorReferenceCode($quadrant, $index + 1);
+            }
+            unset($factorItem);
+
             $factorCounts[$quadrant] = count($items);
             $limit = in_array($quadrant, ['strengths', 'opportunities'], true)
                 ? $topFactorsLimit
@@ -1142,6 +1160,8 @@ class SwotAnalysisService
 
             $factors[$quadrant] = $items;
         }
+
+        $factorReferenceCatalog = $this->buildFactorReferenceCatalog($factors);
 
         $recommendations = [
             'short_term' => [],
@@ -1226,24 +1246,35 @@ class SwotAnalysisService
                         $historicalCard,
                         self::HISTORICAL_TABLE_ITEMS_PER_ANALYSIS
                     ))
-                    ->map(function (SwotCardItem $item) use ($sourceCatalog, $analysisWideSources): array {
+                    ->map(function (SwotCardItem $item) use ($sourceCatalog, $analysisWideSources, $factorReferenceCatalog): array {
                         $sources = $this->resolveSourceReferencesList(
                             Arr::get($item->metadata ?? [], 'sources'),
                             Arr::get($item->metadata ?? [], 'source_name'),
-                            $item->swot_link ?: Arr::get($item->metadata ?? [], 'source_url'),
+                            Arr::get($item->metadata ?? [], 'source_url'),
                             $sourceCatalog,
                             $analysisWideSources
                         );
                         $primarySource = $sources[0] ?? $this->resolveSourceReference(
                             Arr::get($item->metadata ?? [], 'source_name'),
-                            $item->swot_link ?: Arr::get($item->metadata ?? [], 'source_url'),
+                            Arr::get($item->metadata ?? [], 'source_url'),
                             $sourceCatalog
+                        );
+                        $swotReferences = $this->resolveActionPlanSwotReferences(
+                            [
+                                'swot_link' => $item->swot_link,
+                                'swot_references' => Arr::get($item->metadata ?? [], 'swot_references'),
+                            ],
+                            $factorReferenceCatalog
                         );
 
                         return [
                             'id' => $item->uuid,
                             'strategic_action' => $item->title,
-                            'swot_link' => $primarySource['source_url'],
+                            'swot_link' => $this->formatActionPlanSwotLink(
+                                $swotReferences,
+                                $this->sanitizeString($item->swot_link)
+                            ),
+                            'swot_references' => $swotReferences,
                             'source_name' => $primarySource['source_name'],
                             'source_origin' => $primarySource['source_origin'],
                             'source_category' => $primarySource['source_category'],
@@ -1428,49 +1459,30 @@ class SwotAnalysisService
         $toolsSeen = $recommendationsBlock['tools_seen'];
         $blockResponses[] = ['block' => 'recommendations', 'response' => $recommendationsBlock['response']];
 
-        $actionPlanBlock = $this->requestSwotJsonBlock(
+        $overview = $this->normalizeOverviewBlock($overviewBlock['json']);
+        $factors = $this->normalizeFactorsBlock($factorsBlock['json']);
+        $recommendations = $this->normalizeRecommendationsBlock($recommendationsBlock['json']);
+
+        $actionPlanContext = $this->buildSwotExecutionContextSnapshot($factors, $recommendations);
+        [$actionPlan, $conversationId, $toolsSeen, $actionPlanResponses] = $this->generateActionPlanByArea(
             $customerUuid,
             $brainFilters,
             $conversationId,
             $toolsSeen,
-            'action_plan',
-            $this->buildSwotActionPlanBlockPrompt(),
-            '{"action_plan":[{"area_key":"...","title":"...","items":[...]}]}'
+            $actionPlanContext
         );
-        $conversationId = $actionPlanBlock['conversation_id'];
-        $toolsSeen = $actionPlanBlock['tools_seen'];
-        $blockResponses[] = ['block' => 'action_plan', 'response' => $actionPlanBlock['response']];
-        $actionPlan = $this->normalizeActionPlan($actionPlanBlock['json']['action_plan'] ?? $actionPlanBlock['json']);
-        if (! $this->isActionPlanStructurallyComplete($actionPlan)) {
-            $actionPlanBlock = $this->requestSwotJsonBlock(
-                $customerUuid,
-                $brainFilters,
-                $conversationId,
-                $toolsSeen,
-                'action_plan',
-                $this->buildSwotActionPlanBlockPrompt()."\n\n".$this->buildBlockCompletenessPrompt(
-                    'action_plan',
-                    [
-                        'Retorne obrigatoriamente as 6 areas fixas exigidas.',
-                        'Cada area precisa conter no minimo 10 items validos.',
-                        'Nao omita areas mesmo quando houver pouca evidencia; use o corpus interno consolidado e complemente com web market apenas quando necessário.',
-                    ]
-                ),
-                '{"action_plan":[{"area_key":"...","title":"...","items":[...]}]}'
-            );
-            $conversationId = $actionPlanBlock['conversation_id'];
-            $toolsSeen = $actionPlanBlock['tools_seen'];
-            $blockResponses[] = ['block' => 'action_plan-retry', 'response' => $actionPlanBlock['response']];
-            $actionPlan = $this->normalizeActionPlan($actionPlanBlock['json']['action_plan'] ?? $actionPlanBlock['json']);
+        foreach ($actionPlanResponses as $actionPlanResponse) {
+            $blockResponses[] = $actionPlanResponse;
         }
 
+        $implicationsContext = $this->buildSwotImplicationsContextSnapshot($factors, $recommendations);
         $implicationsBlock = $this->requestSwotJsonBlock(
             $customerUuid,
             $brainFilters,
             $conversationId,
             $toolsSeen,
             'strategic_implications',
-            $this->buildSwotStrategicImplicationsBlockPrompt(),
+            $this->buildSwotStrategicImplicationsBlockPrompt($implicationsContext),
             '{"strategic_implications":[{"id":"so-accelerate|st-defend|wo-invest|wt-mitigate","items":[...]}]}'
         );
         $conversationId = $implicationsBlock['conversation_id'];
@@ -1486,7 +1498,7 @@ class SwotAnalysisService
                 $conversationId,
                 $toolsSeen,
                 'strategic_implications',
-                $this->buildSwotStrategicImplicationsBlockPrompt()."\n\n".$this->buildBlockCompletenessPrompt(
+                $this->buildSwotStrategicImplicationsBlockPrompt($implicationsContext)."\n\n".$this->buildBlockCompletenessPrompt(
                     'strategic_implications',
                     [
                         'Retorne obrigatoriamente os 4 grupos fixos: so-accelerate, st-defend, wo-invest, wt-mitigate.',
@@ -1504,10 +1516,6 @@ class SwotAnalysisService
             );
         }
 
-        $overview = $this->normalizeOverviewBlock($overviewBlock['json']);
-        $factors = $this->normalizeFactorsBlock($factorsBlock['json']);
-        $recommendations = $this->normalizeRecommendationsBlock($recommendationsBlock['json']);
-
         $structuredAnswer = [
             'analysis_summary' => $overview['analysis_summary'],
             'factors' => $factors,
@@ -1516,7 +1524,6 @@ class SwotAnalysisService
             'strategic_implications' => $strategicImplications,
             'strategic_note' => $overview['strategic_note'],
         ];
-
         $qualityIssues = $this->collectStructuredQualityIssues($structuredAnswer);
         if ($qualityIssues !== []) {
             throw new RuntimeException('SWOT generation failed quality gates: '.implode(' | ', $qualityIssues));
@@ -1553,7 +1560,7 @@ class SwotAnalysisService
     ): array {
         $lastIssue = 'Unknown block parsing error.';
 
-        for ($attempt = 1; $attempt <= 2; $attempt++) {
+        for ($attempt = 1; $attempt <= 3; $attempt++) {
             $requestPayload = [
                 'question' => $attempt === 1
                     ? $question
@@ -1842,35 +1849,48 @@ class SwotAnalysisService
         ]);
     }
 
-    private function buildSwotActionPlanBlockPrompt(): string
+    private function buildSwotActionPlanBlockPrompt(string $contextSnapshot): string
     {
         return implode("\n", [
             '[SWOT BLOCK | ACTION_PLAN]',
             'Retorne APENAS JSON valido (sem markdown e sem texto fora do JSON).',
             'Gere somente o bloco action_plan.',
+            '',
+            '[FATORES E RECOMENDACOES JA GERADOS]',
+            $contextSnapshot,
             'Regras obrigatorias:',
             '- 6 areas fixas obrigatorias: technology-product, commercial-marketing, operations-support, finance-pricing, hr-people, legal-compliance.',
             '- Minimo 10 items por area.',
-            '- Cada item: strategic_action, source_name, source_url, period, kpi, owner, priority.',
+            '- action_plan deve ser um OBJETO com exatamente essas 6 chaves fixas, nunca uma lista solta.',
+            '- Cada item: strategic_action, swot_references, source_name, source_url, period, kpi, owner, priority.',
+            '- swot_references deve ter 1 ou 2 referencias reais da matriz SWOT ja gerada.',
+            '- Cada referencia em swot_references deve conter: quadrant e title.',
+            '- quadrant valido: strength, opportunity, weakness, threat.',
+            '- title deve repetir o titulo do fator SWOT que sustenta a acao.',
+            '- strategic_action, period, kpi, owner e priority devem ser coerentes com essas referencias SWOT.',
             '- source_url deve ser URL externa HTTP/HTTPS valida.',
             'Schema de resposta:',
-            '{"action_plan":[{"area_key":"technology-product|commercial-marketing|operations-support|finance-pricing|hr-people|legal-compliance","title":"string","items":[{"strategic_action":"string","source_name":"string","source_url":"https://...","period":"string","kpi":"string","owner":"string","priority":"Critica|Alta|Media|Baixa"}]}]}',
+            '{"action_plan":{"technology-product":{"title":"string","items":[{"strategic_action":"string","swot_references":[{"quadrant":"strength|opportunity|weakness|threat","title":"string"}],"source_name":"string","source_url":"https://...","period":"string","kpi":"string","owner":"string","priority":"Critica|Alta|Media|Baixa"}]},"commercial-marketing":{"title":"string","items":[...]}, "operations-support":{"title":"string","items":[...]}, "finance-pricing":{"title":"string","items":[...]}, "hr-people":{"title":"string","items":[...]}, "legal-compliance":{"title":"string","items":[...]}}}',
         ]);
     }
 
-    private function buildSwotStrategicImplicationsBlockPrompt(): string
+    private function buildSwotStrategicImplicationsBlockPrompt(string $contextSnapshot): string
     {
         return implode("\n", [
             '[SWOT BLOCK | STRATEGIC_IMPLICATIONS]',
             'Retorne APENAS JSON valido (sem markdown e sem texto fora do JSON).',
             'Gere somente o bloco strategic_implications.',
+            '',
+            '[MATRIZ SWOT JA GERADA]',
+            $contextSnapshot,
             'Regras obrigatorias:',
             '- Obrigatorio 4 grupos: so-accelerate, st-defend, wo-invest, wt-mitigate.',
             '- Minimo 10 items por grupo.',
+            '- strategic_implications deve ser um OBJETO com exatamente essas 4 chaves fixas, nunca uma lista solta.',
             '- Cada item: id, title, factor_ref, scenario_ref, source_name, source_url.',
             '- Tons validos: strength, opportunity, weakness, threat.',
             'Schema de resposta:',
-            '{"strategic_implications":[{"id":"so-accelerate|st-defend|wo-invest|wt-mitigate","first_factor_label":"string","first_factor_tone":"strength|opportunity|weakness|threat","second_factor_label":"string","second_factor_tone":"strength|opportunity|weakness|threat","action_label":"string","items":[{"id":"string","title":"string","factor_ref":"string","scenario_ref":"string","source_name":"string","source_url":"https://..."}]}]}',
+            '{"strategic_implications":{"so-accelerate":{"id":"so-accelerate","first_factor_label":"string","first_factor_tone":"strength","second_factor_label":"string","second_factor_tone":"opportunity","action_label":"Onde Acelerar","items":[{"id":"string","title":"string","factor_ref":"string","scenario_ref":"string","source_name":"string","source_url":"https://..."}]},"st-defend":{"id":"st-defend","first_factor_label":"string","first_factor_tone":"strength","second_factor_label":"string","second_factor_tone":"threat","action_label":"Onde Defender","items":[...]}, "wo-invest":{"id":"wo-invest","first_factor_label":"string","first_factor_tone":"weakness","second_factor_label":"string","second_factor_tone":"opportunity","action_label":"Onde Investir","items":[...]}, "wt-mitigate":{"id":"wt-mitigate","first_factor_label":"string","first_factor_tone":"weakness","second_factor_label":"string","second_factor_tone":"threat","action_label":"Onde Mitigar Risco","items":[...]}}}',
         ]);
     }
 
@@ -1903,6 +1923,316 @@ class SwotAnalysisService
         }
 
         return implode("\n", $lines);
+    }
+
+    /**
+     * @param array<string, mixed> $brainFilters
+     * @param array<int, string> $toolsSeen
+     * @return array{0: array<int, array<string, mixed>>, 1: string|null, 2: array<int, string>, 3: array<int, array<string, mixed>>}
+     */
+    private function generateActionPlanByArea(
+        string $customerUuid,
+        array $brainFilters,
+        ?string $conversationId,
+        array $toolsSeen,
+        string $contextSnapshot
+    ): array {
+        $responses = [];
+        $areas = [];
+
+        foreach (self::ACTION_PLAN_CARD_DEFINITIONS as $areaKey => $definition) {
+            $question = $this->buildSwotActionPlanAreaBlockPrompt($areaKey, $definition['title'], $contextSnapshot);
+            $schema = '{"area_key":"'.$areaKey.'","title":"string","items":[{"strategic_action":"string","swot_references":[{"quadrant":"strength|opportunity|weakness|threat","title":"string"}],"source_name":"string","source_url":"https://...","period":"string","kpi":"string","owner":"string","priority":"Critica|Alta|Media|Baixa"}]}';
+            $block = $this->requestSwotJsonBlock(
+                $customerUuid,
+                $brainFilters,
+                $conversationId,
+                $toolsSeen,
+                'action_plan:'.$areaKey,
+                $question,
+                $schema
+            );
+            $conversationId = $block['conversation_id'];
+            $toolsSeen = $block['tools_seen'];
+            $responses[] = ['block' => 'action_plan:'.$areaKey, 'response' => $block['response']];
+
+            $normalizedArea = $this->normalizeSingleActionPlanArea(
+                $block['json']['action_plan'][$areaKey] ?? $block['json']['action_plan'] ?? $block['json'],
+                $areaKey,
+                $definition['title']
+            );
+
+            if ($normalizedArea !== null && count($normalizedArea['items']) >= self::MIN_ACTION_ITEMS_PER_AREA) {
+                $areas[] = $normalizedArea;
+                continue;
+            }
+
+            $repairQuestion = $question."\n\n".$this->buildBlockCompletenessPrompt(
+                'action_plan:'.$areaKey,
+                [
+                    'Retorne somente a area "'.$areaKey.'" com no minimo 10 itens validos.',
+                    'Nao omita a chave area_key e nao troque o nome da area.',
+                    'Todos os itens devem conter strategic_action, swot_references, source_name, source_url, period, kpi, owner e priority.',
+                ]
+            );
+            $repairBlock = $this->requestSwotJsonBlock(
+                $customerUuid,
+                $brainFilters,
+                $conversationId,
+                $toolsSeen,
+                'action_plan:'.$areaKey.':repair',
+                $repairQuestion,
+                $schema
+            );
+            $conversationId = $repairBlock['conversation_id'];
+            $toolsSeen = $repairBlock['tools_seen'];
+            $responses[] = ['block' => 'action_plan:'.$areaKey.':repair', 'response' => $repairBlock['response']];
+
+            $normalizedArea = $this->normalizeSingleActionPlanArea(
+                $repairBlock['json']['action_plan'][$areaKey] ?? $repairBlock['json']['action_plan'] ?? $repairBlock['json'],
+                $areaKey,
+                $definition['title']
+            );
+
+            if ($normalizedArea !== null && count($normalizedArea['items']) >= self::MIN_ACTION_ITEMS_PER_AREA) {
+                $areas[] = $normalizedArea;
+            }
+        }
+
+        return [$areas, $conversationId, $toolsSeen, $responses];
+    }
+
+    private function buildSwotActionPlanAreaBlockPrompt(string $areaKey, string $areaTitle, string $contextSnapshot): string
+    {
+        return implode("\n", [
+            '[SWOT BLOCK | ACTION_PLAN_AREA]',
+            'Retorne APENAS JSON valido (sem markdown e sem texto fora do JSON).',
+            'Gere somente UMA area do plano de acao.',
+            '',
+            '[FATORES E RECOMENDACOES JA GERADOS]',
+            $contextSnapshot,
+            '',
+            'Area obrigatoria desta resposta: '.$areaKey.' ('.$areaTitle.').',
+            'Regras obrigatorias:',
+            '- Retorne exatamente 1 objeto de area.',
+            '- area_key deve ser exatamente '.$areaKey.'.',
+            '- title deve refletir '.$areaTitle.'.',
+            '- Minimo 10 items validos.',
+            '- Cada item: strategic_action, swot_references, source_name, source_url, period, kpi, owner, priority.',
+            '- swot_references deve ter 1 ou 2 referencias reais da matriz SWOT ja gerada.',
+            '- quadrant valido: strength, opportunity, weakness, threat.',
+            '- source_url deve ser URL externa HTTP/HTTPS valida.',
+            'Schema de resposta:',
+            '{"action_plan":{"'.$areaKey.'":{"title":"'.$areaTitle.'","items":[{"strategic_action":"string","swot_references":[{"quadrant":"strength|opportunity|weakness|threat","title":"string"}],"source_name":"string","source_url":"https://...","period":"string","kpi":"string","owner":"string","priority":"Critica|Alta|Media|Baixa"}]}}}',
+        ]);
+    }
+
+    /**
+     * @return array<string, mixed>|null
+     */
+    private function normalizeSingleActionPlanArea(mixed $entry, string $areaKey, string $areaTitle): ?array
+    {
+        if (! is_array($entry)) {
+            return null;
+        }
+
+        $normalized = $this->normalizeActionPlan([
+            [
+                'area_key' => $areaKey,
+                'title' => $entry['title'] ?? $areaTitle,
+                'items' => $entry['items'] ?? [],
+            ],
+        ]);
+
+        return $normalized[0] ?? null;
+    }
+
+    /**
+     * @param array<string, mixed> $brainFilters
+     * @param array<int, string> $toolsSeen
+     * @param array<int, array<string, mixed>> $actionPlan
+     * @return array{0: array<int, array<string, mixed>>, 1: string|null, 2: array<int, string>, 3: array<int, array<string, mixed>>}
+     */
+    private function repairActionPlanStructure(
+        string $customerUuid,
+        array $brainFilters,
+        ?string $conversationId,
+        array $toolsSeen,
+        array $actionPlan,
+        string $contextSnapshot
+    ): array {
+        $responses = [];
+
+        for ($repairAttempt = 1; $repairAttempt <= 3; $repairAttempt++) {
+            if ($this->isActionPlanStructurallyComplete($actionPlan)) {
+                break;
+            }
+
+            $missingAreas = $this->resolveMissingActionPlanAreas($actionPlan);
+            $question = $this->buildSwotActionPlanBlockPrompt($contextSnapshot)."\n\n".$this->buildBlockCompletenessPrompt(
+                'action_plan',
+                [
+                    'Retorne obrigatoriamente as 6 areas fixas exigidas.',
+                    'Cada area precisa conter no minimo 10 items validos.',
+                    'Nao omita areas mesmo quando houver pouca evidencia; use o corpus interno consolidado e complemente com web market apenas quando necessário.',
+                    'Areas ausentes neste momento: '.implode(', ', $missingAreas).'.',
+                    'Reescreva o bloco action_plan completo, nao apenas fragmentos.',
+                ]
+            );
+
+            $actionPlanBlock = $this->requestSwotJsonBlock(
+                $customerUuid,
+                $brainFilters,
+                $conversationId,
+                $toolsSeen,
+                'action_plan',
+                $question,
+                '{"action_plan":[{"area_key":"...","title":"...","items":[...]}]}'
+            );
+
+            $conversationId = $actionPlanBlock['conversation_id'];
+            $toolsSeen = $actionPlanBlock['tools_seen'];
+            $responses[] = ['block' => sprintf('action_plan-repair-%d', $repairAttempt), 'response' => $actionPlanBlock['response']];
+            $candidate = $this->normalizeActionPlan($actionPlanBlock['json']['action_plan'] ?? $actionPlanBlock['json']);
+            $actionPlan = $this->mergeActionPlanAreas($actionPlan, $candidate);
+        }
+
+        return [$actionPlan, $conversationId, $toolsSeen, $responses];
+    }
+
+    /**
+     * @param array<int, array<string, mixed>> $actionPlan
+     * @return array<int, string>
+     */
+    private function resolveMissingActionPlanAreas(array $actionPlan): array
+    {
+        $present = [];
+        foreach ($actionPlan as $entry) {
+            if (! is_array($entry)) {
+                continue;
+            }
+            $areaKey = $this->sanitizeString($entry['area_key'] ?? null);
+            if ($areaKey !== null) {
+                $present[$areaKey] = true;
+            }
+        }
+
+        $missing = [];
+        foreach (array_keys(self::ACTION_PLAN_CARD_DEFINITIONS) as $requiredArea) {
+            if (! isset($present[$requiredArea])) {
+                $missing[] = $requiredArea;
+            }
+        }
+
+        return $missing;
+    }
+
+    /**
+     * @param array<int, array<string, mixed>> $current
+     * @param array<int, array<string, mixed>> $incoming
+     * @return array<int, array<string, mixed>>
+     */
+    private function mergeActionPlanAreas(array $current, array $incoming): array
+    {
+        $byArea = [];
+
+        foreach ($current as $entry) {
+            if (! is_array($entry)) {
+                continue;
+            }
+            $areaKey = $this->sanitizeString($entry['area_key'] ?? null);
+            if ($areaKey === null) {
+                continue;
+            }
+            $byArea[$areaKey] = $entry;
+        }
+
+        foreach ($incoming as $entry) {
+            if (! is_array($entry)) {
+                continue;
+            }
+            $areaKey = $this->sanitizeString($entry['area_key'] ?? null);
+            if ($areaKey === null) {
+                continue;
+            }
+
+            $incomingItems = is_array($entry['items'] ?? null) ? $entry['items'] : [];
+            $currentItems = is_array($byArea[$areaKey]['items'] ?? null) ? $byArea[$areaKey]['items'] : [];
+
+            if (count($incomingItems) >= max(count($currentItems), self::MIN_ACTION_ITEMS_PER_AREA)) {
+                $byArea[$areaKey] = $entry;
+                continue;
+            }
+
+            if (! isset($byArea[$areaKey])) {
+                $byArea[$areaKey] = $entry;
+            }
+        }
+
+        $merged = [];
+        foreach (self::ACTION_PLAN_CARD_DEFINITIONS as $areaKey => $definition) {
+            if (isset($byArea[$areaKey])) {
+                $merged[] = $byArea[$areaKey];
+            }
+        }
+
+        return $merged;
+    }
+
+    /**
+     * @param array<string, mixed> $factors
+     * @param array<string, mixed> $recommendations
+     */
+    private function buildSwotExecutionContextSnapshot(array $factors, array $recommendations): string
+    {
+        $snapshot = [
+            'factors' => [],
+            'recommendations' => [],
+        ];
+
+        foreach (['strengths', 'opportunities', 'weaknesses', 'threats'] as $quadrant) {
+            $items = is_array($factors[$quadrant] ?? null) ? $factors[$quadrant] : [];
+            $snapshot['factors'][$quadrant] = array_values(array_map(function (array $item): array {
+                return [
+                    'title' => $this->sanitizeString($item['title'] ?? null),
+                    'priority' => $this->sanitizeString($item['priority'] ?? null),
+                    'tag' => $this->sanitizeString($item['tag'] ?? null),
+                ];
+            }, array_slice($items, 0, 10)));
+        }
+
+        foreach (['short_term', 'mid_term', 'long_term'] as $bucket) {
+            $items = is_array($recommendations[$bucket] ?? null) ? $recommendations[$bucket] : [];
+            $snapshot['recommendations'][$bucket] = array_values(array_map(function (array $item): array {
+                return [
+                    'title' => $this->sanitizeString($item['title'] ?? null),
+                    'priority' => $this->sanitizeString($item['priority'] ?? null),
+                    'period_label' => $this->sanitizeString($item['period_label'] ?? $item['period'] ?? null),
+                ];
+            }, array_slice($items, 0, 10)));
+        }
+
+        return json_encode($snapshot, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES) ?: '{}';
+    }
+
+    /**
+     * @param array<string, mixed> $factors
+     * @param array<string, mixed> $recommendations
+     */
+    private function buildSwotImplicationsContextSnapshot(array $factors, array $recommendations): string
+    {
+        return $this->buildSwotExecutionContextSnapshot($factors, $recommendations);
+    }
+
+    private function mapQuadrantToTone(string $quadrant): string
+    {
+        return match ($quadrant) {
+            'strengths' => 'strength',
+            'opportunities' => 'opportunity',
+            'weaknesses' => 'weakness',
+            'threats' => 'threat',
+            default => 'strength',
+        };
     }
 
     /**
@@ -2222,7 +2552,8 @@ class SwotAnalysisService
             $owner = $this->sanitizeString($item['owner'] ?? null);
             $priority = $this->sanitizeString($item['priority'] ?? null);
             $sourceName = $this->sanitizeSourceName($item['source_name'] ?? $item['source'] ?? null);
-            $sourceUrl = $this->normalizeExternalUrl($item['source_url'] ?? $item['swot_link'] ?? null);
+            $sourceUrl = $this->normalizeExternalUrl($item['source_url'] ?? null);
+            $swotReferences = $this->normalizeActionPlanSwotReferences($item['swot_references'] ?? []);
 
             if ($period === null) {
                 $issues[] = sprintf('%s[%d].period nao pode ser vazio.', $path, $index);
@@ -2242,6 +2573,9 @@ class SwotAnalysisService
                     $path,
                     $index
                 );
+            }
+            if ($swotReferences === []) {
+                $issues[] = sprintf('%s[%d].swot_references precisa conter pelo menos 1 referencia SWOT.', $path, $index);
             }
 
             if (count($issues) >= 20) {
@@ -2837,8 +3171,21 @@ class SwotAnalysisService
             return [];
         }
 
+        $entries = $actionPlan;
+        $isAssociative = array_keys($actionPlan) !== range(0, count($actionPlan) - 1);
+        if ($isAssociative) {
+            $entries = [];
+            foreach (self::ACTION_PLAN_CARD_DEFINITIONS as $areaKey => $definition) {
+                $entry = $actionPlan[$areaKey] ?? null;
+                if (! is_array($entry)) {
+                    continue;
+                }
+                $entries[] = array_merge($entry, ['area_key' => $areaKey]);
+            }
+        }
+
         $normalized = [];
-        foreach ($actionPlan as $entry) {
+        foreach ($entries as $entry) {
             if (! is_array($entry)) {
                 continue;
             }
@@ -2883,8 +3230,10 @@ class SwotAnalysisService
             $normalized[] = [
                 'item_key' => $this->sanitizeString($item['item_key'] ?? null),
                 'strategic_action' => $strategicAction,
-                'swot_link' => $this->normalizeExternalUrl($item['source_url'] ?? $item['swot_link'] ?? null),
+                'swot_link' => $this->sanitizeString($item['swot_link'] ?? null),
+                'swot_references' => $this->normalizeActionPlanSwotReferences($item['swot_references'] ?? []),
                 'source_name' => $this->sanitizeSourceName($item['source_name'] ?? $item['source'] ?? null),
+                'source_url' => $this->normalizeExternalUrl($item['source_url'] ?? null),
                 'sources' => $this->normalizeSourceReferences($item['sources'] ?? []),
                 'period' => $this->sanitizeString($item['period'] ?? null),
                 'kpi' => $this->sanitizeString($item['kpi'] ?? null),
@@ -2906,8 +3255,21 @@ class SwotAnalysisService
             return [];
         }
 
+        $entries = $groups;
+        $isAssociative = array_keys($groups) !== range(0, count($groups) - 1);
+        if ($isAssociative) {
+            $entries = [];
+            foreach (self::REQUIRED_IMPLICATION_GROUP_KEYS as $groupKey) {
+                $group = $groups[$groupKey] ?? null;
+                if (! is_array($group)) {
+                    continue;
+                }
+                $entries[] = array_merge($group, ['id' => $group['id'] ?? $groupKey]);
+            }
+        }
+
         $normalized = [];
-        foreach ($groups as $group) {
+        foreach ($entries as $group) {
             if (! is_array($group)) {
                 continue;
             }
@@ -3187,11 +3549,234 @@ class SwotAnalysisService
                 $items = [];
             }
 
-            $entry['items'] = $this->applySourceCatalogToListItems($items, $sourceCatalog);
+            $resolvedItems = [];
+            foreach ($items as $item) {
+                if (! is_array($item)) {
+                    continue;
+                }
+
+                $sources = $this->resolveSourceReferencesList(
+                    $item['sources'] ?? [],
+                    $item['source_name'] ?? null,
+                    $item['source_url'] ?? null,
+                    $sourceCatalog
+                );
+                $source = $sources[0] ?? $this->resolveSourceReference(
+                    $item['source_name'] ?? null,
+                    $item['source_url'] ?? null,
+                    $sourceCatalog
+                );
+
+                $item['source_name'] = $source['source_name'];
+                $item['source_url'] = $source['source_url'];
+                $item['sources'] = $sources;
+                $item['swot_references'] = $this->normalizeActionPlanSwotReferences($item['swot_references'] ?? []);
+                $resolvedItems[] = $item;
+            }
+
+            $entry['items'] = $resolvedItems;
             $normalized[] = $entry;
         }
 
         return $normalized;
+    }
+
+    /**
+     * @param mixed $references
+     * @return array<int, array<string, string|null>>
+     */
+    private function normalizeActionPlanSwotReferences(mixed $references): array
+    {
+        if (! is_array($references)) {
+            return [];
+        }
+
+        $normalized = [];
+        $seen = [];
+
+        foreach ($references as $reference) {
+            if (! is_array($reference)) {
+                continue;
+            }
+
+            $quadrant = $this->normalizeFactorQuadrant($reference['quadrant'] ?? $reference['tone'] ?? null);
+            $code = $this->sanitizeSwotReferenceCode($reference['code'] ?? $reference['reference_code'] ?? null);
+            $title = $this->sanitizeString($reference['title'] ?? $reference['label'] ?? $reference['reference_label'] ?? null);
+
+            if ($quadrant === '' && $code === null && $title === null) {
+                continue;
+            }
+
+            $key = mb_strtolower(($quadrant ?: '').'|'.($code ?? '').'|'.($title ?? ''));
+            if (isset($seen[$key])) {
+                continue;
+            }
+            $seen[$key] = true;
+
+            $normalized[] = [
+                'quadrant' => $quadrant !== '' ? $quadrant : null,
+                'code' => $code,
+                'title' => $title,
+            ];
+        }
+
+        return $normalized;
+    }
+
+    private function buildFactorReferenceCode(string $quadrant, int $position): ?string
+    {
+        $prefix = self::FACTOR_REFERENCE_PREFIXES[$quadrant] ?? null;
+        if ($prefix === null || $position < 1) {
+            return null;
+        }
+
+        return sprintf('%s%d', $prefix, $position);
+    }
+
+    /**
+     * @param array<string, array<int, array<string, mixed>>> $factors
+     * @return array<string, mixed>
+     */
+    private function buildFactorReferenceCatalog(array $factors): array
+    {
+        $catalog = [
+            'by_code' => [],
+            'by_quadrant_title' => [],
+        ];
+
+        foreach (['strengths', 'opportunities', 'weaknesses', 'threats'] as $quadrant) {
+            $items = $factors[$quadrant] ?? [];
+            if (! is_array($items)) {
+                continue;
+            }
+
+            foreach (array_values($items) as $index => $item) {
+                if (! is_array($item)) {
+                    continue;
+                }
+
+                $title = $this->sanitizeString($item['title'] ?? null);
+                $code = $this->buildFactorReferenceCode($quadrant, $index + 1);
+                if ($title === null || $code === null) {
+                    continue;
+                }
+
+                $entry = [
+                    'code' => $code,
+                    'label' => $title,
+                    'quadrant' => $quadrant,
+                ];
+
+                $catalog['by_code'][$code] = $entry;
+                $catalog['by_quadrant_title'][$quadrant.'|'.$this->normalizeReferenceLabelKey($title)] = $entry;
+            }
+        }
+
+        return $catalog;
+    }
+
+    private function sanitizeSwotReferenceCode(mixed $value): ?string
+    {
+        $candidate = $this->sanitizeString($value);
+        if ($candidate === null) {
+            return null;
+        }
+
+        if (! preg_match('/^([SWOT])\s*([1-9]\d*)$/i', $candidate, $matches)) {
+            return null;
+        }
+
+        return strtoupper($matches[1]).$matches[2];
+    }
+
+    private function normalizeReferenceLabelKey(mixed $value): string
+    {
+        $candidate = $this->sanitizeString($value);
+        if ($candidate === null) {
+            return '';
+        }
+
+        $normalized = preg_replace('/\s+/u', ' ', mb_strtolower(trim($candidate)));
+
+        return is_string($normalized) ? $normalized : '';
+    }
+
+    /**
+     * @param array<string, mixed> $item
+     * @param array<string, mixed> $catalog
+     * @return array<int, array<string, string>>
+     */
+    private function resolveActionPlanSwotReferences(array $item, array $catalog): array
+    {
+        $resolved = [];
+        $seen = [];
+
+        foreach ($this->normalizeActionPlanSwotReferences($item['swot_references'] ?? []) as $reference) {
+            $entry = null;
+            $code = $this->sanitizeSwotReferenceCode($reference['code'] ?? null);
+            $quadrant = $this->normalizeFactorQuadrant($reference['quadrant'] ?? null);
+            $title = $this->sanitizeString($reference['title'] ?? null);
+
+            if ($code !== null && isset($catalog['by_code'][$code]) && is_array($catalog['by_code'][$code])) {
+                $entry = $catalog['by_code'][$code];
+            } elseif ($quadrant !== '' && $title !== null) {
+                $lookupKey = $quadrant.'|'.$this->normalizeReferenceLabelKey($title);
+                if (isset($catalog['by_quadrant_title'][$lookupKey]) && is_array($catalog['by_quadrant_title'][$lookupKey])) {
+                    $entry = $catalog['by_quadrant_title'][$lookupKey];
+                }
+            }
+
+            if ($entry === null) {
+                continue;
+            }
+
+            $entryKey = ($entry['code'] ?? '').'|'.($entry['label'] ?? '');
+            if ($entryKey === '|' || isset($seen[$entryKey])) {
+                continue;
+            }
+            $seen[$entryKey] = true;
+
+            $resolved[] = $entry;
+        }
+
+        $legacyLink = $this->sanitizeString($item['swot_link'] ?? null);
+        if ($legacyLink !== null && preg_match_all('/\b([SWOT])\s*([1-9]\d*)\b/i', $legacyLink, $matches, PREG_SET_ORDER)) {
+            foreach ($matches as $match) {
+                $code = strtoupper($match[1]).$match[2];
+                $entry = $catalog['by_code'][$code] ?? null;
+                if (! is_array($entry)) {
+                    continue;
+                }
+
+                $entryKey = ($entry['code'] ?? '').'|'.($entry['label'] ?? '');
+                if ($entryKey === '|' || isset($seen[$entryKey])) {
+                    continue;
+                }
+                $seen[$entryKey] = true;
+
+                $resolved[] = $entry;
+            }
+        }
+
+        return $resolved;
+    }
+
+    /**
+     * @param array<int, array<string, string>> $references
+     */
+    private function formatActionPlanSwotLink(array $references, ?string $fallback = null): ?string
+    {
+        if ($references !== []) {
+            return implode(
+                ' · ',
+                array_map(
+                    static fn (array $reference): string => trim(sprintf('%s: %s', $reference['code'], $reference['label'])),
+                    $references
+                )
+            );
+        }
+
+        return $fallback;
     }
 
     /**
